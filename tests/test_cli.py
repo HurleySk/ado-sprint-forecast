@@ -5,6 +5,7 @@ import pytest
 from click.testing import CliRunner
 
 from sprint_forecast import cli
+from sprint_forecast.analytics import HttpError
 from sprint_forecast.cache import connect, load_cache
 from sprint_forecast.synth import generate
 
@@ -140,3 +141,33 @@ def test_data_on_empty_cache_reports_zero(tmp_path):
     result = run(tmp_path, "data")
     assert result.exit_code == 0, result.output
     assert "Sprints reconstructed: 0" in result.output
+
+
+def test_extract_reports_failures_without_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADO_PAT", "not-a-real-token")
+
+    def fetch(url):
+        if "/Beta/" in url:
+            raise HttpError(500, url, "boom")
+        if "_apis/projects" in url:
+            return {"value": [{"name": "Alpha"}, {"name": "Beta"}]}
+        return {"value": []}
+
+    monkeypatch.setattr(cli, "make_fetch_json", lambda method, pat: fetch)
+    run(tmp_path, "init", "--org", "https://dev.azure.com/contoso", "--projects", "*")
+    result = run(tmp_path, "extract")
+    assert result.exit_code == 1
+    assert "Beta: failed (HTTP 500: boom)" in result.output and "1 failed" in result.output
+
+
+def test_extract_cannot_list_projects_is_a_clean_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADO_PAT", "not-a-real-token")
+
+    def fetch(url):
+        raise HttpError(401, url, "")
+
+    monkeypatch.setattr(cli, "make_fetch_json", lambda method, pat: fetch)
+    run(tmp_path, "init", "--org", "https://dev.azure.com/contoso", "--projects", "*")
+    result = run(tmp_path, "extract")
+    assert result.exit_code == 1
+    assert "Error: cannot list projects: HTTP 401" in result.output

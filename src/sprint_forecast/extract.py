@@ -1,9 +1,12 @@
 """Pull revisions, iterations and teams per project into cache.db. The only module that talks to ADO."""
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http.client import HTTPException
 from typing import Callable
 
 from sprint_forecast.analytics import (
@@ -35,6 +38,10 @@ REVISION_EXPAND = "Iteration($select=IterationPath),Area($select=AreaPath),Assig
 ITERATION_SELECT = "IterationSK,IterationPath,IterationName,StartDate,EndDate,IsEnded"
 TEAM_SELECT = "TeamSK,TeamName"
 TEAM_EXPAND = "Areas($select=AreaPath),Iterations($select=IterationPath)"
+OPTIONAL_SELECT = ("StoryPoints", "Effort", "ParentWorkItemId")  # not every process has these
+OPTIONAL_EXPAND = {"AssignedTo": "AssignedTo", "UserSK": "AssignedTo"}
+_UNAVAILABLE = re.compile(r"VS403522: The property '([^']+)'")
+PROJECT_ERRORS = (HttpError, OSError, HTTPException, ValueError)
 
 
 @dataclass
@@ -45,18 +52,60 @@ class ExtractResult:
     iterations: int = 0
     teams: int = 0
     skipped: str | None = None
+    failed: str | None = None
+    dropped: list[str] = field(default_factory=list)
 
 
-def revisions_url(org: str, project: str, work_item_types: list[str], watermark: str | None) -> str:
+def describe_error(e: Exception) -> str:
+    """One line for a failed request: 'HTTP 500: <server message>' or '<ExceptionType>: <text>'."""
+    if not isinstance(e, HttpError):
+        return f"{type(e).__name__}: {e}"
+    try:
+        message = json.loads(e.body)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        message = e.body
+    message = " ".join(str(message).split())[:200]
+    return f"HTTP {e.status}: {message}" if message else f"HTTP {e.status}"
+
+
+def revisions_url(
+    org: str,
+    project: str,
+    work_item_types: list[str],
+    watermark: str | None,
+    select: str = REVISION_SELECT,
+    expand: str = REVISION_EXPAND,
+) -> str:
     filters = [f"WorkItemType in ({','.join(odata_string(t) for t in work_item_types)})"]
     if watermark:
         filters.append(f"ChangedDate ge {watermark}")
-    return odata_url(org, project, "WorkItemRevisions", {
-        "$select": REVISION_SELECT,
-        "$expand": REVISION_EXPAND,
-        "$filter": " and ".join(filters),
-        "$orderby": "WorkItemId,Revision",
-    })
+    params = {"$select": select}
+    if expand:
+        params["$expand"] = expand
+    params.update({"$filter": " and ".join(filters), "$orderby": "WorkItemId,Revision"})
+    return odata_url(org, project, "WorkItemRevisions", params)
+
+
+def _fetch_revisions(
+    fetch_json: FetchJson, org: str, project: str, work_item_types: list[str], watermark: str | None,
+) -> tuple[list[dict], list[str]]:
+    """Revision rows, retrying without any optional property Analytics reports unavailable (VS403522)."""
+    select, expand, dropped = REVISION_SELECT.split(","), REVISION_EXPAND.split(","), []
+    while True:
+        url = revisions_url(org, project, work_item_types, watermark, ",".join(select), ",".join(expand))
+        try:
+            return [revision_row(project, r) for r in paginate(fetch_json, url)], dropped
+        except HttpError as e:
+            m = _UNAVAILABLE.search(e.body) if e.status == 400 else None
+            prop = m.group(1) if m else None
+            nav = OPTIONAL_EXPAND.get(prop)
+            if prop in OPTIONAL_SELECT and prop in select:
+                select.remove(prop)
+            elif nav and any(x.startswith(nav + "(") for x in expand):
+                expand = [x for x in expand if not x.startswith(nav + "(")]
+            else:
+                raise
+            dropped.append(prop)
 
 
 def iterations_url(org: str, project: str) -> str:
@@ -136,8 +185,7 @@ def extract_project(
             areas.extend(a)
             subs.extend(s)
         watermark = None if full else get_meta(conn, watermark_key(project))
-        url = revisions_url(org, project, work_item_types, watermark)
-        rows = [revision_row(project, r) for r in paginate(fetch_json, url)]
+        rows, result.dropped = _fetch_revisions(fetch_json, org, project, work_item_types, watermark)
     except HttpError as e:
         if e.status in (401, 403):
             result.skipped = f"HTTP {e.status}: no Analytics access"
@@ -168,13 +216,24 @@ def extract_all(
     full: bool = False,
     echo: Callable[[str], None] = print,
 ) -> list[ExtractResult]:
+    """Extract each project; a project that fails is reported and the rest still run.
+    Errors listing projects for "*" propagate."""
     names = list_projects(fetch_json, org) if projects == ["*"] else projects
     results = []
     for project in names:
-        r = extract_project(fetch_json, conn, org, project, work_item_types=work_item_types, full=full)
-        if r.skipped:
+        try:
+            r = extract_project(fetch_json, conn, org, project, work_item_types=work_item_types, full=full)
+        except PROJECT_ERRORS as e:
+            r = ExtractResult(project, failed=describe_error(e))
+        if r.failed:
+            echo(f"  {project}: failed ({r.failed})")
+        elif r.skipped:
             echo(f"  {project}: skipped ({r.skipped})")
         else:
-            echo(f"  {project}: {r.fetched} revisions fetched ({r.inserted} new), {r.iterations} iterations, {r.teams} teams")
+            note = f"; not available in this project: {', '.join(r.dropped)}" if r.dropped else ""
+            echo(
+                f"  {project}: {r.fetched} revisions fetched ({r.inserted} new), "
+                f"{r.iterations} iterations, {r.teams} teams{note}"
+            )
         results.append(r)
     return results

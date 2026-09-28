@@ -25,12 +25,20 @@ def raw_rev(item_id, rev, changed, **kw):
     return row
 
 
+def unavailable_body(prop):
+    """The shape of a real Analytics 400 for a field the project's process does not have."""
+    msg = f"VS403522: The property '{prop}' is not available on the specified Project(s). Please remove '{prop}' from your query and try again."
+    return '{"error":{"code":"0","message":"VS403483: The query specified in the URI is not valid: ' + msg + '.","innererror":{"message":"' + msg + '"}}}'
+
+
 class FakeAnalytics:
     """Routes Analytics URLs to in-memory rows; supports the ChangedDate ge filter and per-project 401s."""
 
     def __init__(self):
         self.data = {}
         self.denied = set()
+        self.broken = {}
+        self.unavailable = {}
         self.calls = []
 
     def __call__(self, url):
@@ -40,6 +48,11 @@ class FakeAnalytics:
         project, entity = m.group(1), m.group(2)
         if project in self.denied:
             raise HttpError(401, url)
+        if project in self.broken:
+            raise HttpError(self.broken[project], url, '{"error":{"code":"0","message":"server trouble"}}')
+        for prop in self.unavailable.get(project, ()):
+            if re.search(rf"[=,(]{prop}([,)(&]|$)", text):
+                raise HttpError(400, url, unavailable_body(prop))
         rows = self.data.get((project, entity), [])
         wm = re.search(r"ChangedDate ge ([^&\s]+)", text)
         if wm:
@@ -198,4 +211,36 @@ def test_star_lists_projects_via_rest(tmp_path, fake):
     conn = connect(tmp_path / "cache.db")
     results = extract_all(fetch, conn, ORG, ["*"], work_item_types=TYPES, echo=lambda s: None)
     assert [r.project for r in results] == ["Alpha"]
+    conn.close()
+
+
+def test_unavailable_optional_fields_are_dropped_and_retried(tmp_path, fake):
+    fake.data[("Beta", "WorkItemRevisions")] = [raw_rev(9, 1, "2024-06-01T00:00:00Z", StoryPoints=None, AssignedTo=None)]
+    fake.unavailable["Beta"] = ["StoryPoints", "AssignedTo"]
+    conn = connect(tmp_path / "cache.db")
+    r = extract_project(fake, conn, ORG, "Beta", work_item_types=TYPES)
+    assert r.fetched == 1 and r.dropped == ["StoryPoints", "AssignedTo"]
+    last = unquote([u for u in fake.calls if "WorkItemRevisions" in u][-1])
+    assert "StoryPoints" not in last and "AssignedTo" not in last and "Effort" in last
+    assert load_cache(conn).revisions["story_points"].isna().all()
+    conn.close()
+
+
+def test_unavailable_required_field_fails_instead_of_looping(tmp_path, fake):
+    fake.unavailable["Alpha"] = ["WorkItemId"]
+    conn = connect(tmp_path / "cache.db")
+    with pytest.raises(HttpError):
+        extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
+    conn.close()
+
+
+def test_failing_project_is_reported_and_the_rest_continue(tmp_path, fake):
+    fake.broken["Beta"] = 500
+    conn = connect(tmp_path / "cache.db")
+    lines = []
+    results = extract_all(fake, conn, ORG, ["Beta", "Alpha"], work_item_types=TYPES, echo=lines.append)
+    assert results[0].failed == "HTTP 500: server trouble"
+    assert results[1].fetched == 2 and results[1].failed is None
+    assert "  Beta: failed (HTTP 500: server trouble)" in lines
+    assert get_meta(conn, watermark_key("Beta")) is None
     conn.close()

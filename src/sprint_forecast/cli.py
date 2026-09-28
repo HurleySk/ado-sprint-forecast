@@ -26,7 +26,7 @@ from sprint_forecast.config import (
     parse_done_categories,
     save_config,
 )
-from sprint_forecast.extract import extract_all
+from sprint_forecast.extract import PROJECT_ERRORS, describe_error, extract_all
 from sprint_forecast.features import build_features, build_features_for, team_history
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.rollup import fit_forecaster, forecast_sprint, summarize
@@ -315,10 +315,15 @@ def extract(root: Path, projects: tuple[str, ...], full: bool) -> None:
             fetch_json, conn, cfg.org_url, list(projects) or cfg.projects,
             work_item_types=cfg.work_item_types, full=full, echo=click.echo,
         )
+    except PROJECT_ERRORS as e:
+        raise click.ClickException(f"cannot list projects: {describe_error(e)}") from None
     finally:
         conn.close()
     skipped = sum(1 for r in results if r.skipped)
-    click.echo(f"Done: {len(results) - skipped} projects extracted, {skipped} skipped.")
+    failed = sum(1 for r in results if r.failed)
+    click.echo(f"Done: {len(results) - skipped - failed} projects extracted, {skipped} skipped, {failed} failed.")
+    if failed:
+        raise click.exceptions.Exit(1)
 
 
 @main.command()
