@@ -29,11 +29,32 @@ sprint-forecast data          # data-quality report: teams, iterations, unassign
 sprint-forecast backtest      # expanding-window backtest; writes .sprint-forecast/backtest.csv
 sprint-forecast train         # writes .sprint-forecast/model.joblib
 sprint-forecast predict --iteration "Alpha\Sprint 12" --team "Team Red"
+sprint-forecast export --out <folder>   # CSVs for Power BI (see below)
 ```
 
 `--done-categories Resolved,Completed` (on `data`, `backtest` and `train`) widens what counts as done
 when your process closes work in a Resolved state. `predict --as-of now` scores the iteration's current
 contents; by default it uses the contents at the commit cutoff once that has passed.
+
+## Power BI
+
+`sprint-forecast export` forecasts every running team sprint (scored at its commit cutoff, so the number stays
+put for the rest of the sprint) and each team's next sprint (scored on the scope loaded so far), then writes:
+
+| File | One row per | Contents |
+|---|---|---|
+| `sprint_forecasts/<run_id>.csv` | run x team sprint | status, committed items and points, load vs velocity, P(full), P(>=80%), expected, p10/p50/p90, share done so far |
+| `item_forecasts/<run_id>.csv` | run x committed item | work item ID, points, probability of done, top 3 risk factors, state now, done so far |
+| `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends) |
+| `backtest.csv` | backtested sprint and model | predicted band vs actual, copied from the last `backtest` run |
+
+Forecast files are added per run and never rewritten, so the history (progress against the day-1 forecast)
+builds up; `sprints.csv` and `backtest.csv` are replaced. Files are written to a temp name and renamed, so a
+sync client or a refresh never reads half a file. Timestamps are UTC (`2024-06-10T05:00:00Z`).
+
+The files carry no titles or people; join `item_id` to Azure DevOps (e.g. the Analytics OData `WorkItems` feed)
+for titles and assignees. A typical schedule: `extract` then `export` daily, `train` and `backtest` weekly,
+with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI reads with its folder connector.
 
 ## How it works
 
@@ -61,7 +82,8 @@ contents; by default it uses the contents at the commit cutoff once that has pas
 This repository contains code only. The cache, trained models and backtest output live in
 `.sprint-forecast/`, which is git-ignored along with `*.db`, `*.sqlite`, `*.jsonl`, `*.parquet`,
 `*.joblib` and `.env`. Assignees are kept only as opaque Analytics user keys and used only as numeric
-load features. Work item titles are fetched on demand for display and never stored.
+load features. Work item titles are fetched on demand for display and never stored. `export` writes to the folder you
+name: project, team and iteration names, work item IDs and numbers, no titles or people.
 
 ## Development
 

@@ -1,4 +1,4 @@
-"""Click CLI: init, extract, data, backtest, train, predict, demo."""
+"""Click CLI: init, extract, data, backtest, train, predict, export, demo."""
 from __future__ import annotations
 
 import math
@@ -27,16 +27,19 @@ from sprint_forecast.config import (
     parse_done_categories,
     save_config,
 )
+from sprint_forecast.export import export_forecasts, write_csv
 from sprint_forecast.extract import PROJECT_ERRORS, describe_error, extract_all
-from sprint_forecast.features import build_features, build_features_for, team_history
+from sprint_forecast.features import build_features
+from sprint_forecast.forecast import score_iteration
 from sprint_forecast.model import contributions, describe_drivers
-from sprint_forecast.rollup import fit_forecaster, forecast_sprint, summarize
-from sprint_forecast.sprints import SprintData, build_sprints, data_report, scope_at, sprint_calendar
+from sprint_forecast.rollup import fit_forecaster
+from sprint_forecast.sprints import SprintData, build_sprints, data_report, sprint_calendar
 from sprint_forecast.synth import generate
 
 CACHE_FILE = "cache.db"
 MODEL_FILE = "model.joblib"
 BACKTEST_FILE = "backtest.csv"
+EXPORT_DIR = "export"
 DEMO_DIR = "demo"
 TITLE_WIDTH = 50
 
@@ -124,7 +127,7 @@ def _backtest(workdir: Path, s: Settings, **kwargs) -> None:
     result = run_backtest(sd, build_features(sd), **kwargs)
     click.echo(format_report(result))
     out = workdir / BACKTEST_FILE
-    result.sprint_rows.to_csv(out, index=False)
+    write_csv(result.sprint_rows, out)
     click.echo(f"\nPer-sprint rows written to {out}")
 
 
@@ -205,29 +208,24 @@ def _predict(
     else:
         t, label = cutoff, "commit cutoff"
     try:
-        sprints, items = scope_at(
-            cache, history, iteration=iteration, cutoff=t, work_item_types=s.work_item_types,
+        scored = score_iteration(
+            fc, cache, history, iteration=iteration, t=t, work_item_types=s.work_item_types,
             done_categories=s.done_categories, commit_grace_days=s.commit_grace_days, team=team,
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from None
-    if items.empty:
+    if not scored:
         click.echo(f"No committed items in {iteration} as of {label} ({t:%Y-%m-%d %H:%M} UTC).")
         return []
-    feats = build_features_for(sprints, items, history.sprints, history.items)
-    velocity = team_history(sprints, history.sprints).set_index("sprint_id")["trailing_velocity"]
     titles: dict[int, str] = {}
     if title_lookup is not None and top > 0:
         try:
-            titles = title_lookup(sorted(int(i) for i in feats["item_id"]))
+            titles = title_lookup(sorted(int(i) for sc in scored for i in sc.items["item_id"]))
         except Exception:  # titles are cosmetic; never fail a forecast over them
             titles = {}
     results = []
-    for sid, rows in feats.groupby("sprint_id", sort=False):
-        srow = sprints.set_index("sprint_id").loc[sid]
-        p, samples = forecast_sprint(fc, rows, seed=0)
-        summary = summarize(samples)
-        v = velocity.get(sid, float("nan"))
+    for sc in scored:
+        srow, summary, v = sc.sprint, sc.summary, sc.velocity
         click.echo(f"\n{srow['team_key']} | {iteration}")
         click.echo(
             f"  window {srow['start']:%Y-%m-%d} .. {srow['end']:%Y-%m-%d} UTC; "
@@ -246,7 +244,7 @@ def _predict(
             f"expected {_pct(summary['expected'])}   p10/p50/p90 "
             f"{_pct(summary['p10'])} / {_pct(summary['p50'])} / {_pct(summary['p90'])}"
         )
-        risky = rows.assign(p=p).sort_values("p", kind="mergesort").head(top)
+        risky = sc.items.sort_values("p", kind="mergesort").head(top)
         if len(risky):
             click.echo("  riskiest items:")
             contrib = contributions(fc.item_model, risky)
@@ -256,8 +254,22 @@ def _predict(
                 click.echo(f"    #{int(r['item_id'])}  p={r['p']:.2f}  {r['points']:.1f} pts  {title}".rstrip())
                 if drivers:
                     click.echo(f"        why: {'; '.join(drivers)}")
-        results.append({"sprint_id": sid, **summary})
+        results.append({"sprint_id": srow["sprint_id"], **summary})
     return results
+
+
+def _export(workdir: Path, out: Path, now: pd.Timestamp | None = None):
+    bundle = _load_model(workdir)
+    result = export_forecasts(_load_cache(workdir), bundle, out, now=now, backtest_csv=workdir / BACKTEST_FILE)
+    if result.sprints.empty:
+        click.echo("No running or upcoming team sprints with committed scope; wrote sprint outcomes only.")
+    for r in result.sprints.itertuples(index=False):
+        click.echo(
+            f"{r.team_key} | {r.iteration}: {r.status}, scored as of {r.basis}; "
+            f"P(full) {_pct(r.p_full)}, expected {_pct(r.expected)}, done so far {_pct(r.pct_done_so_far)}"
+        )
+    click.echo(f"Wrote {len(result.files)} files to {out}")
+    return result
 
 
 done_option = click.option(
@@ -374,6 +386,19 @@ def predict(root: Path, iteration: str, team: str | None, as_of: str, top: int, 
     """Forecast one iteration's committed scope."""
     lookup = _title_lookup(root) if titles else None
     _predict(data_dir(root), iteration=iteration, team=team, as_of=as_of, top=top, title_lookup=lookup)
+
+
+@main.command()
+@click.option(
+    "--out", type=click.Path(file_okay=False, path_type=Path), default=None,
+    help="Folder for the CSVs (default: .sprint-forecast/export). Point it at a synced SharePoint or OneDrive "
+         "folder to feed Power BI.",
+)
+@click.pass_obj
+def export(root: Path, out: Path | None) -> None:
+    """Forecast running sprints and each team's next sprint; write Power BI-ready CSVs."""
+    workdir = data_dir(root)
+    _export(workdir, out or workdir / EXPORT_DIR)
 
 
 @main.command()

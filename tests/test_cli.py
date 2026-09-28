@@ -209,3 +209,24 @@ def test_console_command_replaces_characters_the_terminal_cannot_encode(tmp_path
     sys.stdout.flush()
     assert exc.value.code == 0
     assert "café ? plan" in out.getvalue().decode("cp1252")
+
+
+def test_export_command_writes_power_bi_tables(workspace, tmp_path):
+    out = tmp_path / "bi"
+    result = run(workspace, "export", "--out", str(out))
+    assert result.exit_code == 0, result.output
+    assert "No running or upcoming team sprints" in result.output  # synthetic sprints all ended in 2024
+    assert (out / "sprints.csv").exists() and len(list((out / "sprint_forecasts").glob("*.csv"))) == 1
+
+
+def test_export_lists_each_forecast(workspace, tmp_path, capsys):
+    now = pd.Timestamp("2024-06-12T12:00:00Z")  # Alpha Sprint 12 is running
+    result = cli._export(workspace / ".sprint-forecast", tmp_path, now=now)
+    output = capsys.readouterr().out
+    assert "Alpha/Team Red | Alpha\Sprint 12: running, scored as of commit cutoff" in output
+    assert f"Wrote {len(result.files)} files to {tmp_path}" in output
+
+
+def test_export_without_a_model_explains(tmp_path):
+    result = CliRunner().invoke(cli.main, ["--root", str(tmp_path), "export"])
+    assert result.exit_code != 0 and "sprint-forecast train" in result.output
