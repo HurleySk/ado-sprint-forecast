@@ -3,6 +3,7 @@ import pytest
 from scipy.special import expit
 
 from sprint_forecast.rollup import (
+    _gauss_hermite,
     fit_forecaster,
     fit_sigma,
     forecast_sprint,
@@ -36,17 +37,19 @@ def test_simulation_is_deterministic_and_handles_empty():
 
 
 def _planted(sigma, n_sprints=400, n_items=15, seed=0):
+    """Outcomes with a planted sprint shock; p is each item's marginal (calibrated) done probability."""
     rng = np.random.default_rng(seed)
     base = rng.normal(0.8, 1.0, size=(n_sprints, n_items))
     z = rng.normal(0.0, sigma, size=(n_sprints, 1))
     y = (rng.random((n_sprints, n_items)) < expit(base + z)).astype(float)
     groups = np.repeat(np.arange(n_sprints), n_items)
-    return expit(base).ravel(), y.ravel(), groups
+    x, w = _gauss_hermite()
+    return expit(base.ravel()[:, None] + sigma * x[None, :]) @ w, y.ravel(), groups
 
 
 def test_sigma_fit_recovers_planted_sigma():
     p, y, groups = _planted(0.8, seed=0)
-    assert fit_sigma(p, y, groups) == pytest.approx(0.8, abs=0.15)  # seed 0 gives 0.83; seeds 0-9 give 0.76-0.87
+    assert fit_sigma(p, y, groups) == pytest.approx(0.8, abs=0.15)  # seed 0 gives 0.83; seeds 0-9 give 0.76-0.89
 
 
 def test_sigma_fit_near_zero_without_shock():
@@ -77,3 +80,10 @@ def test_forecaster_on_synth(synth40):
     assert 0.0 <= s["p10"] <= s["p50"] <= s["p90"] <= 1.0
     assert 0.0 <= s["p_full"] <= s["p_80"] <= 1.0
     assert len(p) == (target["sprint_id"] == sid).sum()
+
+
+def test_shock_preserves_each_items_calibrated_probability():
+    samples = simulate_pct_done(np.full(20, 0.85), np.ones(20), sigma=1.0, n_draws=200_000, seed=0)
+    assert samples.mean() == pytest.approx(0.85, abs=0.005)
+    low = simulate_pct_done(np.full(20, 0.1), np.ones(20), sigma=2.0, n_draws=200_000, seed=0)
+    assert low.mean() == pytest.approx(0.1, abs=0.005)

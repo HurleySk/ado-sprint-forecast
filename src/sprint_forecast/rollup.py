@@ -25,17 +25,43 @@ def _log_sigmoid(x: np.ndarray) -> np.ndarray:
     return -np.logaddexp(0.0, -x)
 
 
-def sprint_log_likelihood(sigma: float, p: np.ndarray, y: np.ndarray, groups: np.ndarray) -> float:
-    """sum over sprints of log  integral prod_i Bern(y_i | sigmoid(logit p_i + z)) N(z; 0, sigma^2) dz."""
+def _gauss_hermite() -> tuple[np.ndarray, np.ndarray]:
+    """Nodes x and weights w with sum_k w_k f(x_k) ~= E[f(Z)] for Z ~ N(0, 1)."""
     nodes, weights = np.polynomial.hermite.hermgauss(GH_NODES)
-    z = np.sqrt(2.0) * sigma * nodes
-    eta = _logit(p)[:, None] + z[None, :]
+    return np.sqrt(2.0) * nodes, weights / np.sqrt(np.pi)
+
+
+def shifted_logit(p: np.ndarray, sigma: float, max_iter: int = 50) -> np.ndarray:
+    """Per-item logit eta with E[sigmoid(eta + z)] = p for z ~ N(0, sigma^2): the shared sprint shock spreads
+    outcomes without moving any item's calibrated probability (plain logit(p) + z pulls it toward 0.5)."""
+    target = np.clip(np.asarray(p, dtype=float), P_CLIP, 1 - P_CLIP)
+    eta = _logit(target)
+    if sigma <= 0 or len(eta) == 0:
+        return eta
+    x, w = _gauss_hermite()
+    z = sigma * x
+    eta = eta * np.sqrt(1.0 + np.pi * sigma**2 / 8.0)  # logistic-normal approximation as the start
+    for _ in range(max_iter):
+        s = expit(eta[:, None] + z[None, :])
+        step = (s @ w - target) / np.maximum((s * (1.0 - s)) @ w, 1e-12)
+        eta = eta - np.clip(step, -2.0, 2.0)
+        if np.max(np.abs(step)) < 1e-10:
+            break
+    return eta
+
+
+def sprint_log_likelihood(sigma: float, p: np.ndarray, y: np.ndarray, groups: np.ndarray) -> float:
+    """sum over sprints of log  integral prod_i Bern(y_i | sigmoid(eta_i + z)) N(z; 0, sigma^2) dz,
+    with eta_i = shifted_logit(p_i, sigma) so each item's marginal probability stays p_i."""
+    x, w = _gauss_hermite()
+    z = sigma * x
+    eta = shifted_logit(p, sigma)[:, None] + z[None, :]
     y = np.asarray(y, dtype=float)[:, None]
     item_ll = y * _log_sigmoid(eta) + (1.0 - y) * _log_sigmoid(-eta)
     codes, uniques = pd.factorize(pd.Series(groups))
     per_sprint = np.zeros((len(uniques), GH_NODES))
     np.add.at(per_sprint, codes, item_ll)
-    log_w = np.log(weights / np.sqrt(np.pi))
+    log_w = np.log(w)
     return float(logsumexp(per_sprint + log_w[None, :], axis=1).sum())
 
 
@@ -55,14 +81,15 @@ def fit_sigma(p: np.ndarray, y: np.ndarray, groups: np.ndarray) -> float:
 def simulate_pct_done(
     p: np.ndarray, points: np.ndarray, sigma: float, n_draws: int = N_DRAWS, seed: int = 0,
 ) -> np.ndarray:
-    """Samples of sum(points * done) / sum(points), with one shared shock z ~ N(0, sigma^2) per draw."""
+    """Samples of sum(points * done) / sum(points), with one shared shock z ~ N(0, sigma^2) per draw;
+    each item's mean done rate stays p (see shifted_logit)."""
     p = np.asarray(p, dtype=float)
     w = np.asarray(points, dtype=float)
     if len(p) == 0 or w.sum() <= 0:
         return np.full(n_draws, np.nan)
     rng = np.random.default_rng(seed)
     z = rng.normal(0.0, sigma, size=(n_draws, 1)) if sigma > 0 else np.zeros((n_draws, 1))
-    prob = expit(_logit(p)[None, :] + z)
+    prob = expit(shifted_logit(p, sigma)[None, :] + z)
     done = rng.random((n_draws, len(p))) < prob
     return done @ w / w.sum()
 
