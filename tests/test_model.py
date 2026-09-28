@@ -97,8 +97,22 @@ def test_describe_drivers_in_plain_words():
     flag_values = pd.Series({f: np.nan for f in FEATURES} | {"is_unestimated": 1.0})
     assert describe_drivers(flags, flag_values) == [
         "item is unestimated = yes",
-        "team's recent completion rate = missing",
+        "team has no earlier sprints",
     ]
+
+
+def test_describe_drivers_says_why_a_value_is_missing():
+    contrib = pd.Series({f: 0.0 for f in FEATURES} | {"assignee_load_ratio": -0.9, "load_ratio": -0.5,
+                                                      "points_rel": -0.4, "age_days": -0.1})
+    values = pd.Series({f: np.nan for f in FEATURES} | {"is_unassigned": 0.0})
+    assert describe_drivers(contrib, values, k=3) == [
+        "assignee has no recent delivery on record",
+        "team has no recent velocity",
+        "item age in days unknown",
+    ]
+    unassigned = values.copy()
+    unassigned["is_unassigned"] = 1.0
+    assert describe_drivers(contrib, unassigned, k=1) == ["item is unassigned"]
 
 
 def test_missing_categories_train_and_predict(synth40):

@@ -176,9 +176,20 @@ def contributions(model: ItemModel, frame: pd.DataFrame) -> pd.DataFrame:
 BOOLEAN_FEATURES = {"is_unestimated", "has_parent", "is_unassigned"}
 
 
+# Why a history feature is NaN, said plainly (see features.team_history and features.assignee_load).
+MISSING_PHRASES = {
+    "assignee_load_ratio": "assignee has no recent delivery on record",
+    "team_trailing_completion": "team has no earlier sprints",
+    "load_ratio": "team has no recent velocity",
+    "points_rel": "team has no recent velocity",
+}
+
+
+def _is_missing(value) -> bool:
+    return isinstance(value, (float, np.floating)) and np.isnan(value)
+
+
 def _fmt(feature: str, value) -> str:
-    if isinstance(value, (float, np.floating)) and np.isnan(value):
-        return "missing"
     if feature in BOOLEAN_FEATURES:
         return "yes" if value else "no"
     if isinstance(value, (float, np.floating)):
@@ -186,8 +197,23 @@ def _fmt(feature: str, value) -> str:
     return str(value)
 
 
+def _describe(feature: str, values: pd.Series) -> str:
+    if not _is_missing(values[feature]):
+        return f"{FEATURE_LABELS[feature]} = {_fmt(feature, values[feature])}"
+    if feature == "assignee_load_ratio" and values.get("is_unassigned") == 1:
+        return "item is unassigned"
+    return MISSING_PHRASES.get(feature, f"{FEATURE_LABELS[feature]} unknown")
+
+
 def describe_drivers(contrib: pd.Series, values: pd.Series, k: int = 2) -> list[str]:
-    """The k most negative contributions, in plain words, e.g. 'sprints already carried over = 2'."""
+    """The k most negative contributions, in plain words, e.g. 'sprints already carried over = 2'.
+    Features that read the same (both velocity ratios when the team has no velocity) are listed once."""
     neg = contrib[FEATURES]
-    neg = neg[neg < 0].sort_values().head(k)
-    return [f"{FEATURE_LABELS[f]} = {_fmt(f, values[f])}" for f in neg.index]
+    out: list[str] = []
+    for f in neg[neg < 0].sort_values().index:
+        if len(out) >= k:
+            break
+        text = _describe(f, values)
+        if text not in out:
+            out.append(text)
+    return out
