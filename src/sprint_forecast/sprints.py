@@ -101,6 +101,12 @@ def _iteration_end_map(cache: CacheData) -> pd.Series:
     return its.set_index("path")["end_date"]
 
 
+def _horizon(cache: CacheData, projects: pd.Series) -> pd.Series:
+    """When each row's project was extracted; now for projects with no recorded extraction."""
+    now = pd.Timestamp.now(tz="UTC")
+    return pd.Series([cache.extracted_at.get(p, now) for p in projects], index=projects.index, dtype="datetime64[ns, UTC]")
+
+
 def _pairs(revisions: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
     """(item_id, target) for every item ever in a window's iteration, joined to the window's dates."""
     seen = revisions.loc[revisions["iteration"].isin(windows["target"]), ["item_id", "iteration"]]
@@ -214,8 +220,10 @@ def build_sprints(
     at_e = as_of_many(revs, pairs[["item_id", "end"]], "end")
     c, n_unassigned = _committed(cache, pairs, at_c, assign, types, done | {REMOVED})
     e = at_e.loc[c.index]
-    c["done"] = (e["iteration"].to_numpy() == c["iteration"].to_numpy()) & e["state_category"].isin(done).to_numpy()
-    c["state_category_at_end"] = e["state_category"].to_numpy()
+    is_open = (c["end"] > _horizon(cache, c["project"])).to_numpy()  # outcome not observed yet
+    ended_done = (e["iteration"].to_numpy() == c["iteration"].to_numpy()) & e["state_category"].isin(done).to_numpy()
+    c["done"] = np.where(is_open, np.nan, ended_done.astype("float64"))
+    c["state_category_at_end"] = np.where(is_open, None, e["state_category"].to_numpy())
 
     target = pairs["target"].to_numpy()
     added_mask = (
@@ -236,9 +244,11 @@ def build_sprints(
         "dropped_empty_sprints": int(len(set(cal["sprint_id"]) - set(sprints["sprint_id"]))),
         "fallback_projects": sorted(set(cal.loc[cal["is_fallback"], "project"])),
         "n_sprints": len(sprints),
+        "open_sprints": int(sprints["pct_done"].isna().sum()) if len(sprints) else 0,
         "n_committed_items": len(items),
         "unestimated_share": float(items["is_unestimated"].mean()) if len(items) else float("nan"),
-        "end_state_mix": items["state_category_at_end"].fillna("(missing)").value_counts().to_dict(),
+        "end_state_mix": items.loc[items["done"].notna(), "state_category_at_end"]
+        .fillna("(missing)").value_counts().to_dict(),
     }
     return SprintData(sprints, items, report)
 

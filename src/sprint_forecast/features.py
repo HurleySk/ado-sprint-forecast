@@ -63,7 +63,7 @@ def team_history(target_sprints: pd.DataFrame, history_sprints: pd.DataFrame) ->
 def assignee_load(target_items: pd.DataFrame, history_items: pd.DataFrame) -> pd.Series:
     """Per target item: its assignee's committed points this sprint / their mean delivered points over the
     last 3 earlier sprints (end < start) they appear in. NaN when unassigned or no history."""
-    h = history_items[history_items["assigned_to_sk"].notna()]
+    h = history_items[history_items["assigned_to_sk"].notna() & history_items["done"].notna()]
     h = h.assign(_delivered=h["points"] * h["done"].astype("float64"))
     per_sprint = h.groupby(["assigned_to_sk", "sprint_id"], as_index=False).agg(
         end=("end", "first"), delivered=("_delivered", "sum")

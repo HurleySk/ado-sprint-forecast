@@ -12,6 +12,7 @@ import numpy as np
 
 from sprint_forecast.cache import (
     connect,
+    extracted_key,
     replace_project_iterations,
     replace_project_teams,
     set_meta,
@@ -263,6 +264,8 @@ def generate(path: Path | str, *, seed: int = 0, n_sprints: int = 40) -> Path:
             )
             changed = [r["changed"] for r in data["revisions"] if r["project"] == project]
             set_meta(conn, watermark_key(project), max(changed))
+            last_end = _iso(sprint_window(project, n_sprints - 1)[1])
+            set_meta(conn, extracted_key(project), max(max(changed), last_end))
         set_meta(conn, "synthetic", f"seed={seed};n_sprints={n_sprints}")
         conn.commit()
     finally:

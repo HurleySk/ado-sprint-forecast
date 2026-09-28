@@ -87,3 +87,15 @@ def test_load_cache_empty_db(tmp_path):
     data = load_cache(conn)
     assert data.revisions.empty and data.iterations.empty and data.teams.empty
     conn.close()
+
+
+def test_load_cache_reads_extraction_times(tmp_path):
+    conn = connect(tmp_path / "cache.db")
+    set_meta(conn, "extracted_at:Alpha", "2024-03-25T00:00:00.000Z")
+    set_meta(conn, "extracted_at:Beta Two", "2024-04-01T12:30:00.000Z")
+    conn.commit()
+    assert load_cache(conn).extracted_at == {
+        "Alpha": pd.Timestamp("2024-03-25T00:00:00Z"), "Beta Two": pd.Timestamp("2024-04-01T12:30:00Z"),
+    }
+    assert set(load_cache(conn, projects=["Alpha"]).extracted_at) == {"Alpha"}
+    conn.close()

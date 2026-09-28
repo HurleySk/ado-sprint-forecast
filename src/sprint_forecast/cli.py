@@ -101,6 +101,7 @@ def format_data_report(report: dict) -> str:
         )
     lines += [
         f"Sprints reconstructed: {report['n_sprints']} ({report['dropped_empty_sprints']} empty sprints dropped)",
+        f"Sprints not ended at extraction (outcome unknown, not used for training): {report['open_sprints']}",
         f"Committed items: {report['n_committed_items']}; unestimated share {_pct(report['unestimated_share'])}",
         f"Unassigned items (no unique team match, excluded): {report['unassigned_items']}",
         f"Items added mid-sprint (after the commit cutoff, excluded): {report['added_mid_sprint']}",

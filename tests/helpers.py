@@ -9,6 +9,7 @@ from sprint_forecast.cache import (
     load_cache,
     replace_project_iterations,
     replace_project_teams,
+    set_meta,
     upsert_revisions,
 )
 
@@ -51,9 +52,13 @@ def team(name: str, areas: list[str], iterations: list[str], project: str = "Alp
     return {"project": project, "name": name, "areas": areas, "iterations": iterations}
 
 
-def build_cache(tmp_path: Path, revisions: list[dict], iterations: list[dict] = (), teams: list[dict] = ()) -> CacheData:
+def build_cache(
+    tmp_path: Path, revisions: list[dict], iterations: list[dict] = (), teams: list[dict] = (), meta: dict | None = None,
+) -> CacheData:
     conn = connect(Path(tmp_path) / "cache.db")
     upsert_revisions(conn, revisions)
+    for key, value in (meta or {}).items():
+        set_meta(conn, key, value)
     projects = {i["project"] for i in iterations} | {t["project"] for t in teams}
     for project in projects:
         replace_project_iterations(conn, project, [i for i in iterations if i["project"] == project])

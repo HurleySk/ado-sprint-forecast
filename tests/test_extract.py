@@ -1,6 +1,7 @@
 import re
 from urllib.parse import unquote
 
+import pandas as pd
 import pytest
 
 from sprint_forecast.analytics import HttpError, to_utc_iso
@@ -84,6 +85,7 @@ def test_first_extract_stores_everything_and_sets_watermark(tmp_path, fake):
     assert (r.fetched, r.inserted, r.iterations, r.teams, r.skipped) == (2, 2, 2, 2, None)
     assert get_meta(conn, watermark_key("Alpha")) == "2024-05-25T14:00:00.000Z"
     data = load_cache(conn)
+    assert pd.Timestamp.now(tz="UTC") - data.extracted_at["Alpha"] < pd.Timedelta(minutes=5)
     assert len(data.revisions) == 2
     assert set(data.team_iterations["iteration_path"]) == {"Alpha\\Sprint 1"}
     it = data.iterations.set_index("path").loc["Alpha\\Sprint 1"]

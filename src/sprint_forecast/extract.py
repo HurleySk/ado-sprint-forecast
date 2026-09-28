@@ -17,6 +17,7 @@ from sprint_forecast.analytics import (
 )
 from sprint_forecast.cache import (
     delete_project_revisions,
+    extracted_key,
     get_meta,
     max_changed,
     replace_project_iterations,
@@ -125,6 +126,7 @@ def extract_project(
     full: bool = False,
 ) -> ExtractResult:
     result = ExtractResult(project)
+    started = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     try:
         iterations = [iteration_row(project, r) for r in paginate(fetch_json, iterations_url(org, project))]
         teams, areas, subs = [], [], []
@@ -150,6 +152,7 @@ def extract_project(
         newest = max_changed(conn, project)
         if newest:
             set_meta(conn, watermark_key(project), newest)
+        set_meta(conn, extracted_key(project), started)
         set_meta(conn, "last_extract", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     result.fetched, result.iterations, result.teams = len(rows), len(iterations), len(teams)
     return result

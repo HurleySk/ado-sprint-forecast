@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from helpers import build_cache, iteration, rev, team
+from sprint_forecast.features import build_features
 from sprint_forecast.sprints import (
     ITEM_COLUMNS,
     SPRINT_COLUMNS,
@@ -279,3 +280,25 @@ def test_synthetic_cache_reconstructs(tmp_path):
     assert 0.3 < sd.sprints["pct_done"].mean() < 0.95
     assert sd.items["carryover_count"].max() >= 1
     assert sd.items["is_unestimated"].any()
+
+
+def test_sprints_not_ended_at_extraction_have_unknown_outcome(tmp_path):
+    s3 = iteration("Alpha\Sprint 3", "2024-04-01T05:00:00.000Z", "2024-04-15T04:59:59.999Z")
+    red = team("Team Red", ["Alpha\Red"], ["Alpha\Sprint 1", "Alpha\Sprint 2", "Alpha\Sprint 3"])
+    revs = [
+        rev(1, 1, PLAN, iteration="Alpha\Sprint 1"),
+        rev(1, 2, MID, iteration="Alpha\Sprint 1", state="Closed", state_category="Completed"),
+        rev(2, 1, "2024-03-18T12:00:00.000Z", iteration="Alpha\Sprint 2", state="Active", state_category="InProgress"),
+        rev(3, 1, "2024-03-20T00:00:00.000Z", iteration="Alpha\Sprint 3"),
+    ]
+    cache = build_cache(tmp_path, revs, [S1, S2, s3], [red], meta={"extracted_at:Alpha": "2024-03-25T00:00:00.000Z"})
+    sd = build_sprints(cache, work_item_types=TYPES)
+    pct = sd.sprints.set_index("iteration")["pct_done"]
+    assert pct["Alpha\Sprint 1"] == 1.0
+    assert math.isnan(pct["Alpha\Sprint 2"]) and math.isnan(pct["Alpha\Sprint 3"])
+    assert sd.items.set_index("item_id")["done"].isna().to_dict() == {1: False, 2: True, 3: True}
+    assert sd.report["open_sprints"] == 2
+    assert sd.report["end_state_mix"] == {"Completed": 1}
+    frame = build_features(sd).set_index("item_id")
+    assert frame.loc[3, "team_sprint_index"] == 1
+    assert math.isnan(frame.loc[3, "y"]) and math.isnan(frame.loc[2, "y"])

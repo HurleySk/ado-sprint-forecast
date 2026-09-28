@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -43,6 +43,7 @@ class CacheData:
     teams: pd.DataFrame
     team_areas: pd.DataFrame
     team_iterations: pd.DataFrame
+    extracted_at: dict[str, pd.Timestamp] = field(default_factory=dict)  # project -> when its data was pulled
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -67,6 +68,13 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 def watermark_key(project: str) -> str:
     return f"watermark:{project}"
+
+
+EXTRACTED_PREFIX = "extracted_at:"
+
+
+def extracted_key(project: str) -> str:
+    return f"{EXTRACTED_PREFIX}{project}"
 
 
 def upsert_revisions(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
@@ -148,4 +156,8 @@ def load_cache(conn: sqlite3.Connection, projects: list[str] | None = None) -> C
     in_sk = f" WHERE team_sk IN ({','.join('?' for _ in sks)})" if sks else " WHERE 0"
     team_areas = pd.read_sql_query(f"SELECT * FROM team_areas{in_sk}", conn, params=sks)
     team_iterations = pd.read_sql_query(f"SELECT * FROM team_iterations{in_sk}", conn, params=sks)
-    return CacheData(revs, its, teams, team_areas, team_iterations)
+    rows = conn.execute("SELECT key, value FROM meta WHERE key LIKE ?", (EXTRACTED_PREFIX + "%",)).fetchall()
+    extracted = {k[len(EXTRACTED_PREFIX):]: pd.Timestamp(v).tz_convert("UTC") for k, v in rows}
+    if projects:
+        extracted = {p: t for p, t in extracted.items() if p in projects}
+    return CacheData(revs, its, teams, team_areas, team_iterations, extracted)
