@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 from email.message import Message
@@ -225,3 +226,23 @@ def test_fetch_titles_chunks_and_tolerates_failure():
 
     assert analytics.fetch_titles(fetch, "https://dev.azure.com/contoso", [1, 2]) == {1: "First"}
     assert analytics.fetch_titles(fetch, "https://dev.azure.com/contoso", [9]) == {}
+
+
+@pytest.mark.parametrize("error", [
+    TimeoutError("timed out"),
+    ConnectionResetError(10054, "reset by peer"),
+    http.client.RemoteDisconnected("closed"),
+    http.client.IncompleteRead(b"partial"),
+])
+def test_fetch_json_retries_dropped_connections(error):
+    calls, sleeps = [], []
+
+    def opener(req, timeout):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise error
+        return FakeResponse({"value": [1]})
+
+    fetch = make_fetch_json("pat", "secret", opener=opener, sleep=sleeps.append)
+    assert fetch("https://x/E") == {"value": [1]}
+    assert len(calls) == 3 and sleeps == [1, 2]

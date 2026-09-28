@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -163,7 +164,7 @@ def make_fetch_json(
                     attempt += 1
                     continue
                 raise HttpError(e.code, url, text) from None
-            except URLError:
+            except (OSError, HTTPException):  # URLError, timeouts, resets, truncated reads
                 if attempt < max_retries:
                     sleep(min(2 ** attempt, 30))
                     attempt += 1
