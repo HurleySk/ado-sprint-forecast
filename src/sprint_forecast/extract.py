@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from typing import Callable
 
@@ -42,6 +42,7 @@ OPTIONAL_SELECT = ("StoryPoints", "Effort", "ParentWorkItemId")  # not every pro
 OPTIONAL_EXPAND = {"AssignedTo": "AssignedTo", "UserSK": "AssignedTo"}
 _UNAVAILABLE = re.compile(r"VS403522: The property '([^']+)'")
 PROJECT_ERRORS = (HttpError, OSError, HTTPException, ValueError)
+WATERMARK_OVERLAP_DAYS = 1.0  # re-read this much before the watermark: Analytics can surface revisions late
 
 
 @dataclass
@@ -84,6 +85,13 @@ def revisions_url(
         params["$expand"] = expand
     params.update({"$filter": " and ".join(filters), "$orderby": "WorkItemId,Revision"})
     return odata_url(org, project, "WorkItemRevisions", params)
+
+
+def _since(watermark: str | None, overlap_days: float) -> str | None:
+    if not watermark:
+        return None
+    t = datetime.fromisoformat(watermark.replace("Z", "+00:00")) - timedelta(days=overlap_days)
+    return t.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _fetch_revisions(
@@ -173,6 +181,7 @@ def extract_project(
     *,
     work_item_types: list[str],
     full: bool = False,
+    overlap_days: float = WATERMARK_OVERLAP_DAYS,
 ) -> ExtractResult:
     result = ExtractResult(project)
     started = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -184,8 +193,8 @@ def extract_project(
             teams.append(t)
             areas.extend(a)
             subs.extend(s)
-        watermark = None if full else get_meta(conn, watermark_key(project))
-        rows, result.dropped = _fetch_revisions(fetch_json, org, project, work_item_types, watermark)
+        since = None if full else _since(get_meta(conn, watermark_key(project)), overlap_days)
+        rows, result.dropped = _fetch_revisions(fetch_json, org, project, work_item_types, since)
     except HttpError as e:
         if e.status in (401, 403):
             result.skipped = f"HTTP {e.status}: no Analytics access"

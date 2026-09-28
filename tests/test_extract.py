@@ -111,15 +111,15 @@ def test_first_extract_stores_everything_and_sets_watermark(tmp_path, fake):
     conn.close()
 
 
-def test_incremental_uses_ge_watermark_and_dedupes_boundary(tmp_path, fake):
+def test_incremental_uses_ge_watermark_minus_overlap_and_dedupes(tmp_path, fake):
     conn = connect(tmp_path / "cache.db")
     extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
     fake.data[("Alpha", "WorkItemRevisions")].append(raw_rev(2, 1, "2024-06-01T00:00:00Z"))
     fake.calls.clear()
     r = extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
     rev_url = unquote([u for u in fake.calls if "WorkItemRevisions" in u][0])
-    assert "ChangedDate ge 2024-05-25T14:00:00.000Z" in rev_url
-    assert r.fetched == 2 and r.inserted == 1
+    assert "ChangedDate ge 2024-05-24T14:00:00.000Z" in rev_url
+    assert r.fetched == 3 and r.inserted == 1
     assert conn.execute("SELECT COUNT(*) FROM revisions").fetchone()[0] == 3
     assert get_meta(conn, watermark_key("Alpha")) == "2024-06-01T00:00:00.000Z"
     conn.close()
@@ -243,4 +243,18 @@ def test_failing_project_is_reported_and_the_rest_continue(tmp_path, fake):
     assert results[1].fetched == 2 and results[1].failed is None
     assert "  Beta: failed (HTTP 500: server trouble)" in lines
     assert get_meta(conn, watermark_key("Beta")) is None
+    conn.close()
+
+
+def test_late_arriving_revision_before_the_watermark_is_picked_up(tmp_path, fake):
+    conn = connect(tmp_path / "cache.db")
+    extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
+    fake.data[("Alpha", "WorkItemRevisions")].append(raw_rev(3, 1, "2024-05-25T12:00:00Z"))  # reached Analytics late
+    r = extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
+    assert r.inserted == 1
+    assert conn.execute("SELECT COUNT(*) FROM revisions WHERE item_id = 3").fetchone()[0] == 1
+    assert get_meta(conn, watermark_key("Alpha")) == "2024-05-25T14:00:00.000Z"
+    fake.calls.clear()
+    extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES, overlap_days=0)
+    assert "ChangedDate ge 2024-05-25T14:00:00.000Z" in unquote([u for u in fake.calls if "WorkItemRevisions" in u][0])
     conn.close()
