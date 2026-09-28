@@ -41,7 +41,7 @@ dev = [
 ]
 
 [project.scripts]
-sprint-forecast = "sprint_forecast.cli:main"
+sprint-forecast = "sprint_forecast.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

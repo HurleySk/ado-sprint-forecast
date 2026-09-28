@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -397,5 +398,16 @@ def demo(root: Path, seed: int, n_sprints: int) -> None:
     _predict(workdir, iteration=latest, team="Team Red", as_of="commit", top=3, title_lookup=None)
 
 
+def run() -> None:
+    """Console entry point. Keeps "*" and other wildcards literal on Windows (click would glob them against
+    the current directory) and writes '?' for characters the terminal's encoding cannot show."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+    main(windows_expand_args=False)
+
+
 if __name__ == "__main__":
-    main()
+    run()

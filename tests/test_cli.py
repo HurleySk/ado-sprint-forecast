@@ -1,4 +1,8 @@
+import io
+import os
+import sys
 import tomllib
+from importlib.metadata import entry_points
 
 import pandas as pd
 import pytest
@@ -171,3 +175,37 @@ def test_extract_cannot_list_projects_is_a_clean_error(tmp_path, monkeypatch):
     result = run(tmp_path, "extract")
     assert result.exit_code == 1
     assert "Error: cannot list projects: HTTP 401" in result.output
+
+
+def console_entry():
+    """The function the installed `sprint-forecast` command calls."""
+    (ep,) = entry_points(group="console_scripts", name="sprint-forecast")
+    return ep.load()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="click expands wildcards in argv only on Windows")
+def test_console_command_keeps_star_literal(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "argv", ["sprint-forecast", "init", "--org", "https://dev.azure.com/contoso", "--projects", "*"])
+    with pytest.raises(SystemExit) as exc:
+        console_entry()()
+    assert exc.value.code == 0
+    doc = tomllib.loads((tmp_path / ".sprint-forecast" / "config.toml").read_text(encoding="utf-8"))
+    assert doc["ado"]["projects"] == ["*"]
+
+
+def test_console_command_replaces_characters_the_terminal_cannot_encode(tmp_path, monkeypatch):
+    root = tmp_path / "café → plan"
+    out, err = io.BytesIO(), io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(out, encoding="cp1252"))
+    monkeypatch.setattr(sys, "stderr", io.TextIOWrapper(err, encoding="cp1252"))
+    monkeypatch.setattr(sys, "argv", [
+        "sprint-forecast", "--root", str(root), "init", "--org", "https://dev.azure.com/contoso", "--projects", "Alpha",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        console_entry()()
+    sys.stdout.flush()
+    assert exc.value.code == 0
+    assert "café ? plan" in out.getvalue().decode("cp1252")
