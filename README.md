@@ -38,17 +38,21 @@ contents; by default it uses the contents at the commit cutoff once that has pas
 ## How it works
 
 - **Extract**: Analytics OData `WorkItemRevisions`, `Iterations` and `Teams` per project into a local
-  SQLite cache, with per-project watermarks. A project that returns 401/403 is skipped.
+  SQLite cache, with per-project watermarks (each run re-reads the last day to catch late revisions).
+  A project that returns 401/403 is skipped; fields its process lacks (e.g. `StoryPoints`) are dropped
+  from the query; any other failure is reported, the remaining projects still run, and the exit code is 1.
+  A missing `StateCategory` is inferred from the state name.
 - **Sprint** = (project, team, iteration with dates). Items are assigned to the subscribed team whose area
   path matches exactly, else by longest prefix, else the only subscribed team; otherwise they are
   reported as unassigned. Committed scope is what sits in the iteration at start + 1 day (the commit
   cutoff); an item is done if at the end date it is still in the iteration and in a done category.
+  Sprints that had not ended when the data was extracted have no outcome yet and are never trained on.
 - **Features** are computed as of the cutoff and use only sprints that ended before the sprint started.
   Team identity is never a feature.
 - **Models**: C, a velocity bootstrap baseline; a team-mean reference; A, a LightGBM item classifier with
   time-split calibration (plus a logistic-regression sanity check). Item probabilities roll up to a sprint
   distribution through a Monte Carlo with a shared per-sprint shock whose size is fitted by maximum
-  likelihood.
+  likelihood; the shock widens the spread without moving any item's calibrated probability.
 - **Backtest**: expanding window, retrained every few sprints, with a leakage check, CRPS, pinball loss,
   Brier scores, coverage and MAE per model and team, plus a leave-one-team-out generalization check.
 
