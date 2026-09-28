@@ -1,0 +1,17 @@
+# Local cache, models and backtest output can contain real org data: never commit them.
+.sprint-forecast/
+*.db
+*.sqlite
+*.jsonl
+*.parquet
+*.joblib
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
