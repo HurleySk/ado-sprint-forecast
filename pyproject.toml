@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/HurleySk/sprint-forecast"
-Repository = "https://github.com/HurleySk/sprint-forecast"
-Issues = "https://github.com/HurleySk/sprint-forecast/issues"
+Homepage = "https://github.com/HurleySk/ado-sprint-forecast"
+Repository = "https://github.com/HurleySk/ado-sprint-forecast"
+Issues = "https://github.com/HurleySk/ado-sprint-forecast/issues"
 
 [project.optional-dependencies]
 dev = [
