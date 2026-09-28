@@ -13,7 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from sprint_forecast.features import CATEGORICAL, FEATURES, NUMERIC
+from sprint_forecast.features import CATEGORICAL, FEATURES, MISSING, NUMERIC
 
 LGBM_PARAMS = {
     "num_leaves": 15,
@@ -74,10 +74,14 @@ def split_by_time(frame: pd.DataFrame, share: float = CALIBRATION_SHARE) -> tupl
     return ids[: len(ids) - n_cal], ids[len(ids) - n_cal:]
 
 
+def _category_values(col: pd.Series) -> pd.Series:
+    return col.fillna(MISSING).astype(str)
+
+
 def to_matrix(frame: pd.DataFrame, categories: dict[str, list[str]]) -> pd.DataFrame:
     X = frame[FEATURES].copy()
     for col in CATEGORICAL:
-        values = X[col].astype(str)
+        values = _category_values(X[col])
         X[col] = pd.Categorical(values.where(values.isin(categories[col])), categories=categories[col])
     for col in NUMERIC:
         X[col] = X[col].astype("float64")
@@ -102,7 +106,7 @@ def _make_lr() -> Pipeline:
 def _lr_input(frame: pd.DataFrame) -> pd.DataFrame:
     X = frame[FEATURES].copy()
     for col in CATEGORICAL:
-        X[col] = X[col].astype(str).astype(object)
+        X[col] = _category_values(X[col]).astype(object)
     for col in NUMERIC:
         X[col] = X[col].astype("float64")
     return X
@@ -122,7 +126,7 @@ def train_item_model(frame: pd.DataFrame, seed: int = 0) -> ItemModel:
     frame = frame[frame["y"].notna()]
     if frame["y"].nunique() < 2:
         raise ValueError("training data needs both delivered and undelivered items")
-    categories = {c: sorted(frame[c].astype(str).unique()) for c in CATEGORICAL}
+    categories = {c: sorted(_category_values(frame[c]).unique()) for c in CATEGORICAL}
     fit_ids, cal_ids = split_by_time(frame)
     fit = frame[frame["sprint_id"].isin(fit_ids)]
     cal = frame[frame["sprint_id"].isin(cal_ids)]

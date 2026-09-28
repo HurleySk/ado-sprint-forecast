@@ -99,3 +99,24 @@ def test_load_cache_reads_extraction_times(tmp_path):
     }
     assert set(load_cache(conn, projects=["Alpha"]).extracted_at) == {"Alpha"}
     conn.close()
+
+
+def test_missing_state_category_is_inferred_from_the_state(tmp_path):
+    conn = connect(tmp_path / "cache.db")
+    t1, t2 = "2024-01-02T00:00:00.000Z", "2024-01-03T00:00:00.000Z"
+    upsert_revisions(conn, [
+        rev(1, 1, t1, state="Done", state_category="Resolved"),
+        rev(1, 2, t2, state="Done", state_category=None),       # same project uses Done as Resolved
+        rev(2, 1, t1, state="Removed", state_category=None),    # never categorized here: standard meaning
+        rev(3, 1, t1, state="In Progress", state_category=None),
+        rev(4, 1, t1, state="Parked", state_category=None),     # unknown name: stays missing
+        rev(5, 1, t1, state="Done", state_category=None, project="Beta"),
+    ])
+    conn.commit()
+    got = load_cache(conn).revisions.set_index(["item_id", "rev"])["state_category"]
+    assert got[(1, 2)] == "Resolved"
+    assert got[(2, 1)] == "Removed"
+    assert got[(3, 1)] == "InProgress"
+    assert pd.isna(got[(4, 1)])
+    assert got[(5, 1)] == "Completed"
+    conn.close()

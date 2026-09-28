@@ -99,3 +99,13 @@ def test_describe_drivers_in_plain_words():
         "item is unestimated = yes",
         "team's recent completion rate = missing",
     ]
+
+
+def test_missing_categories_train_and_predict(synth40):
+    frame = synth40.frame.copy()
+    frame.loc[frame.index[::7], "state_category_at_commit"] = np.nan
+    frame.loc[frame.index[::11], "type"] = np.nan
+    model = train_item_model(frame, seed=0)
+    assert "(missing)" in model.categories["state_category_at_commit"]
+    p = predict_proba(model, frame.head(50))
+    assert np.isfinite(p).all() and np.isfinite(predict_proba_lr(model, frame.head(50))).all()

@@ -7,6 +7,7 @@ import pandas as pd
 from sprint_forecast.sprints import SprintData
 
 CATEGORICAL = ["type", "state_category_at_commit"]
+MISSING = "(missing)"
 ITEM_FEATURES = [
     "type", "state_category_at_commit", "points", "points_rel", "is_unestimated", "carryover_count",
     "age_days", "days_since_change", "revisions_so_far", "has_parent",
@@ -104,8 +105,8 @@ def build_features_for(
     velocity = sid.map(hist["trailing_velocity"])
     velocity = velocity.where(velocity > 0)
     out = items[ID_COLUMNS].copy()
-    out["type"] = items["type"].astype(str)
-    out["state_category_at_commit"] = items["state_category_at_commit"].astype(str)
+    out["type"] = items["type"].fillna(MISSING).astype(str)
+    out["state_category_at_commit"] = items["state_category_at_commit"].fillna(MISSING).astype(str)
     out["points"] = items["points"].astype(float)
     out["points_rel"] = out["points"] / velocity
     out["is_unestimated"] = items["is_unestimated"].astype(float)

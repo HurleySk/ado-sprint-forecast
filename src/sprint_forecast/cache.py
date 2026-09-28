@@ -15,6 +15,13 @@ REVISION_COLUMNS = [
     "iteration", "area", "assigned_to_sk", "story_points", "effort", "parent_id",
 ]
 ITERATION_COLUMNS = ["project", "iteration_sk", "path", "name", "start_date", "end_date", "is_ended"]
+STANDARD_CATEGORIES = {  # state name -> StateCategory in the built-in processes
+    "removed": "Removed",
+    "closed": "Completed", "done": "Completed",
+    "resolved": "Resolved",
+    "new": "Proposed", "proposed": "Proposed", "to do": "Proposed", "approved": "Proposed",
+    "active": "InProgress", "committed": "InProgress", "in progress": "InProgress",
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS revisions (
@@ -128,6 +135,23 @@ def replace_project_teams(
     )
 
 
+def fill_state_categories(revs: pd.DataFrame) -> pd.DataFrame:
+    """Analytics leaves StateCategory null on some revisions. Use the category the same state name has elsewhere
+    in the project, else the state's meaning in the built-in processes; unknown names stay missing."""
+    missing = revs["state_category"].isna() & revs["state"].notna()
+    if not missing.any():
+        return revs
+    known = revs[revs["state_category"].notna() & revs["state"].notna()]
+    usual = {k: g.mode().iloc[0] for k, g in known.groupby(["project", "state"])["state_category"]}
+    todo = revs.loc[missing, ["project", "state"]]
+    from_project = pd.Series([usual.get(k) for k in zip(todo["project"], todo["state"])], index=todo.index, dtype=object)
+    by_name = todo["state"].str.strip().str.casefold().map(STANDARD_CATEGORIES)
+    revs = revs.copy()
+    revs["state_category"] = revs["state_category"].astype(object)
+    revs.loc[missing, "state_category"] = from_project.fillna(by_name).to_numpy()
+    return revs
+
+
 def _ts(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, utc=True, format="ISO8601")
 
@@ -145,6 +169,7 @@ def load_cache(conn: sqlite3.Connection, projects: list[str] | None = None) -> C
     revs["item_id"] = revs["item_id"].astype("int64")
     revs["rev"] = revs["rev"].astype("int64")
     revs = revs.sort_values(["item_id", "changed", "rev"], kind="mergesort").reset_index(drop=True)
+    revs = fill_state_categories(revs)
 
     its = pd.read_sql_query(f"SELECT * FROM iterations{where}", conn, params=params)
     its["start_date"] = _ts(its["start_date"])
