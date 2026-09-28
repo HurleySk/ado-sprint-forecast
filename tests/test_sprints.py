@@ -302,3 +302,9 @@ def test_sprints_not_ended_at_extraction_have_unknown_outcome(tmp_path):
     frame = build_features(sd).set_index("item_id")
     assert frame.loc[3, "team_sprint_index"] == 1
     assert math.isnan(frame.loc[3, "y"]) and math.isnan(frame.loc[2, "y"])
+
+
+def test_no_dated_iterations_builds_no_sprints(tmp_path):
+    sd, cache = build(tmp_path, [rev(1, 1, PLAN, iteration="Alpha\Someday")], iterations=(UNDATED,))
+    assert sd.report["n_sprints"] == 0 and sd.items.empty
+    assert data_report(cache, sd)["projects"][0]["dated_iterations"] == 0

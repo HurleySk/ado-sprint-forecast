@@ -120,6 +120,8 @@ def _carryover(revisions: pd.DataFrame, rows: pd.DataFrame, iteration_end: pd.Se
     left["_row"] = np.arange(len(left))
     hist = left.merge(revisions[["item_id", "changed", "iteration"]], on="item_id")
     hist = hist[hist["changed"] <= hist["cutoff"]]
+    if hist.empty or iteration_end.empty:  # mapping onto nothing yields float NaN, which cannot compare to dates
+        return np.zeros(len(left), dtype="int64")
     hist = hist[hist["iteration"].map(iteration_end) < hist["start"]]
     counts = hist.groupby("_row")["iteration"].nunique()
     return left["_row"].map(counts).fillna(0).astype("int64").to_numpy()

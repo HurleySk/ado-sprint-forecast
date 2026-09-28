@@ -133,3 +133,10 @@ def test_predict_unknown_iteration_and_missing_model(workspace, tmp_path):
     assert result.exit_code != 0 and "no team runs" in result.output
     empty = CliRunner().invoke(cli.main, ["--root", str(tmp_path), "predict", "--iteration", "Alpha\\Sprint 1"])
     assert empty.exit_code != 0 and "sprint-forecast train" in empty.output
+
+
+def test_data_on_empty_cache_reports_zero(tmp_path):
+    connect(tmp_path / ".sprint-forecast" / "cache.db").close()
+    result = run(tmp_path, "data")
+    assert result.exit_code == 0, result.output
+    assert "Sprints reconstructed: 0" in result.output
