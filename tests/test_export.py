@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from conftest import SYNTH_TYPES
-from helpers import build_cache, rev
+from helpers import build_cache, iteration, rev, team
 from sprint_forecast.cycle import CYCLE_STATE_COLUMNS
 from sprint_forecast.export import (
     CYCLE_FILE_COLUMNS,
@@ -112,13 +112,16 @@ def test_export_forecasts_running_and_upcoming_sprints(exported):
         "Alpha/Team Red|Alpha\\Sprint 12", "Alpha/Team Blue|Alpha\\Sprint 12", "Beta/Team Green|Beta\\Sprint 11",
     }
     assert set(sprints["status"]) <= {"running", "upcoming"}
-    assert (sprints.loc[sprints["status"] == "running", "basis"] == "commit cutoff").all()
-    assert (sprints.loc[sprints["status"] == "upcoming", "basis"] == "now").all()
+    assert (sprints["basis"] == "now").all()
+    day1 = ["day1_expected", "day1_p10", "day1_p90"]
+    assert sprints.loc[sprints["status"] == "running", day1].notna().all().all()
+    assert sprints.loc[sprints["status"] == "upcoming", day1].isna().all().all()
+    assert (sprints["day1_p10"].dropna() <= sprints["day1_p90"].dropna()).all()
     assert (sprints["p_full"] <= sprints["p_80"]).all() and (sprints["p10"] <= sprints["p90"]).all()
     assert (sprints["forecast_key"] == sprints["run_id"] + "|" + sprints["sprint_id"]).all()
     red = sprints.set_index("sprint_id").loc["Alpha/Team Red|Alpha\\Sprint 12"]
+    assert red["scored_as_of"] == "2024-06-12T12:00:00Z"
     assert red["start"] == "2024-06-10T05:00:00Z" and red["run_at"] == "2024-06-12T12:00:00Z"
-    assert red["scored_as_of"] == "2024-06-11T05:00:00Z"
     assert red["elapsed_share"] == pytest.approx(55 / (14 * 24), abs=1e-3)
     assert red["data_as_of"] == "2024-08-19T04:59:59Z" and red["model_trained_at"] == "2024-08-20T00:00:00Z"
 
@@ -128,14 +131,73 @@ def test_export_item_rows_match_their_sprint(exported):
     sprints = pd.read_csv(out / "sprint_forecasts" / f"{first.run_id}.csv")
     items = pd.read_csv(out / "item_forecasts" / f"{first.run_id}.csv")
     assert list(items.columns) == ITEM_FORECAST_COLUMNS
-    per_sprint = items.groupby("forecast_key").agg(n=("item_id", "size"), pts=("points", "sum"))
+    committed = items[~items["is_added"]]
+    per_sprint = committed.groupby("forecast_key").agg(n=("item_id", "size"), pts=("points", "sum"))
     joined = sprints.set_index("forecast_key").join(per_sprint)
     assert (joined["n"] == joined["n_items"]).all()
     assert joined["pts"].to_numpy() == pytest.approx(joined["committed_points"].to_numpy())
     assert items["p_done"].between(0, 1).all()
     assert items["risk_factor_1"].notna().any()
-    done = items.assign(w=items["points"] * items["done_now"]).groupby("forecast_key")["w"].sum()
+    done = committed.assign(w=committed["points"] * committed["done_now"]).groupby("forecast_key")["w"].sum()
     assert joined["points_done_so_far"].to_numpy() == pytest.approx(done.reindex(joined.index).to_numpy())
+
+
+@pytest.fixture(scope="module")
+def late(synth16, bundle, tmp_path_factory):
+    """A week later (2024-06-19 12:00 UTC): committed items are finishing and Team Blue has two open added items."""
+    out = tmp_path_factory.mktemp("late")
+    result = export_forecasts(synth16.cache, bundle, out, now=NOW + pd.Timedelta(days=7))
+    return result.sprints, pd.read_csv(out / "item_forecasts" / f"{result.run_id}.csv")
+
+
+def test_export_lists_committed_items_that_are_done_or_gone(late):
+    sprints, items = late
+    running = sprints[sprints["status"] == "running"].set_index("forecast_key")
+    committed = items[~items["is_added"]]
+    per_sprint = committed.groupby("forecast_key").agg(n=("item_id", "size"), pts=("points", "sum"))
+    assert (per_sprint["n"].reindex(running.index) == running["n_items"]).all()
+    assert per_sprint["pts"].reindex(running.index).to_numpy() == pytest.approx(running["committed_points"].to_numpy())
+    done = committed[committed["done_now"]]
+    assert len(done) > 0 and (done["p_done"] == 1.0).all() and done["risk_factor_1"].isna().all()
+    assert (committed.loc[~committed["in_sprint_now"], "p_done"] == 0.0).all()
+    done_points = done.groupby("forecast_key")["points"].sum().reindex(running.index).fillna(0.0)
+    assert running["points_done_so_far"].to_numpy() == pytest.approx(done_points.to_numpy())
+    assert (running["p10"] >= running["pct_done_so_far"] - 1e-12).all()
+
+
+def test_export_marks_items_added_after_the_cutoff(late):
+    sprints, items = late
+    added = items[items["is_added"]]
+    assert len(added) > 0 and added["state_category_at_commit"].isna().all()
+    assert added["p_done"].between(0, 1).all() and not added["done_now"].any()
+    assert set(added["forecast_key"]) <= set(sprints.loc[sprints["status"] == "running", "forecast_key"])
+
+
+def test_a_running_sprint_with_nothing_left_open_lists_each_committed_item(bundle, tmp_path):
+    it0, it1 = "Alpha\\Sprint 0", "Alpha\\Sprint 1"
+    cache = build_cache(tmp_path, [
+        rev(1, 1, "2024-03-01T00:00:00.000Z", iteration=it1),
+        rev(1, 2, "2024-03-08T00:00:00.000Z", iteration=it1, state="Closed", state_category="Completed"),
+        rev(2, 1, "2024-03-01T00:00:00.000Z", iteration=it1),
+        rev(2, 2, "2024-03-09T00:00:00.000Z", iteration="Alpha"),
+    ], [
+        iteration(it0, "2024-02-19T05:00:00.000Z", "2024-03-04T04:59:59.999Z"),
+        iteration(it1, "2024-03-04T05:00:00.000Z", "2024-03-18T04:59:59.999Z"),
+    ], [team("Team Red", ["Alpha\\Red"], [it0, it1])])
+    result = export_forecasts(cache, bundle, tmp_path / "out", now=pd.Timestamp("2024-03-11T00:00:00Z"))
+    (row,) = result.sprints.to_dict("records")
+    assert row["status"] == "running" and row["points_done_so_far"] == 3.0
+    assert row["expected"] == pytest.approx(0.5) and row["p10"] == row["p90"] == pytest.approx(0.5)
+    items = pd.read_csv(tmp_path / "out" / "item_forecasts" / f"{result.run_id}.csv")
+    assert dict(zip(items["item_id"], items["p_done"])) == {1: 1.0, 2: 0.0}
+    assert not items["is_added"].any() and items["risk_factor_1"].isna().all()
+
+
+def test_export_refuses_a_model_from_an_older_version(synth16, bundle, tmp_path):
+    old = {k: v for k, v in bundle.items() if k != "feature_version"}
+    with pytest.raises(ValueError, match="older version; run `sprint-forecast train`"):
+        export_forecasts(synth16.cache, old, tmp_path, now=NOW)
+    assert not any(tmp_path.iterdir())
 
 
 def test_export_appends_forecasts_per_run_and_replaces_snapshots(exported, synth16):

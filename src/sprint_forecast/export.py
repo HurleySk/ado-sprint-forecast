@@ -12,7 +12,7 @@ import pandas as pd
 
 from sprint_forecast.cache import CacheData
 from sprint_forecast.cycle import CYCLE_STATE_COLUMNS, build_cycle
-from sprint_forecast.forecast import ScoredSprint, score_iteration
+from sprint_forecast.forecast import ScoredSprint, check_bundle, score_iteration
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.sprints import SPRINT_COLUMNS, build_sprints, sprint_calendar
 from sprint_forecast.timeline import as_of_many, to_utc
@@ -31,12 +31,13 @@ SPRINT_FORECAST_COLUMNS = [
     "n_items", "committed_points", "n_unestimated", "trailing_velocity", "load_ratio",
     "p_full", "p_80", "expected", "p10", "p50", "p90",
     "items_done_so_far", "points_done_so_far", "pct_done_so_far", "data_as_of", "model_trained_at",
+    "day1_expected", "day1_p10", "day1_p90",
 ]
 RISK_FACTOR_COLUMNS = [f"risk_factor_{k}" for k in range(1, N_RISK_FACTORS + 1)]
 ITEM_FORECAST_COLUMNS = [
     "run_id", "forecast_key", "sprint_id", "item_id", "type", "state_category_at_commit", "points",
     "is_unestimated", "carryover_count", "p_done", *RISK_FACTOR_COLUMNS,
-    "state_category_now", "in_sprint_now", "done_now",
+    "state_category_now", "in_sprint_now", "done_now", "is_added",
 ]
 ITEM_HISTORY_COLUMNS = [
     "sprint_id", "item_id", "type", "points", "is_unestimated", "carryover_count", "added_mid", "assignee", "done",
@@ -146,56 +147,92 @@ def cycle_files(cache: CacheData, users: pd.DataFrame, settings: dict) -> tuple[
     return items[CYCLE_FILE_COLUMNS], cy.states[CYCLE_STATE_COLUMNS]
 
 
-def _item_rows(fc, scored: ScoredSprint, progress: pd.DataFrame, run_id: str, key: str) -> pd.DataFrame:
-    rows = scored.items
-    contrib = contributions(fc.item_model, rows)
-    factors = [describe_drivers(contrib.loc[i], rows.loc[i], k=N_RISK_FACTORS) for i in rows.index]
+def _item_frame(items, *, points, p_done, is_added, factors, progress, run_id, key) -> pd.DataFrame:
     frame = pd.DataFrame({
         "run_id": run_id,
         "forecast_key": key,
-        "sprint_id": rows["sprint_id"],
-        "item_id": rows["item_id"].astype("int64"),
-        "type": rows["type"],
-        "state_category_at_commit": rows["state_category_at_commit"],
-        "points": rows["points"],
-        "is_unestimated": rows["is_unestimated"].astype(bool),
-        "carryover_count": rows["carryover_count"].astype("int64"),
-        "p_done": rows["p"],
-    }, index=rows.index)
+        "sprint_id": items["sprint_id"],
+        "item_id": items["item_id"].astype("int64"),
+        "type": items["type"],
+        "state_category_at_commit": items["state_category_at_commit"].where(~is_added),
+        "points": points,
+        "is_unestimated": items["is_unestimated"].astype(bool),
+        "carryover_count": items["carryover_count"].astype("int64"),
+        "p_done": p_done,
+        "is_added": is_added,
+    }, index=items.index)
     for k, col in enumerate(RISK_FACTOR_COLUMNS):
         frame[col] = [f[k] if k < len(f) else None for f in factors]
     return frame.join(progress)[ITEM_FORECAST_COLUMNS]
 
 
-def _sprint_row(scored: ScoredSprint, items: pd.DataFrame, *, run_id, now, key, status, basis, t, data_as_of, trained_at):
+def _item_rows(fc, scored: ScoredSprint, cache: CacheData, done_categories, run_id: str, key: str) -> pd.DataFrame:
+    """Every open row at scored.t with its p_done and risk factors, then every committed item no longer open: done
+    (p_done 1) or out of the sprint (p_done 0), without risk factors."""
+    rows = scored.items
+    still_open = set(rows.loc[rows["is_added"] == 0, "item_id"].astype("int64"))
+    closed = scored.committed[~scored.committed["item_id"].astype("int64").isin(still_open)]
+    parts = []
+    if len(rows):
+        added = rows["is_added"] == 1
+        contrib = contributions(fc.item_model, rows)
+        parts.append(_item_frame(
+            rows,
+            points=rows["points_at_commit"].where(~added, rows["points"]).astype("float64"),
+            p_done=rows["p"].astype("float64"),
+            is_added=added,
+            factors=[describe_drivers(contrib.loc[i], rows.loc[i], k=N_RISK_FACTORS) for i in rows.index],
+            progress=progress_at(cache, rows, scored.t, done_categories),
+            run_id=run_id, key=key,
+        ))
+    if len(closed):
+        progress = progress_at(cache, closed, scored.t, done_categories)
+        parts.append(_item_frame(
+            closed,
+            points=closed["points"].astype("float64"),
+            p_done=progress["done_now"].astype("float64"),
+            is_added=pd.Series(False, index=closed.index),
+            factors=[[] for _ in closed.index],
+            progress=progress,
+            run_id=run_id, key=key,
+        ))
+    if not parts:
+        return pd.DataFrame(columns=ITEM_FORECAST_COLUMNS)
+    return pd.concat(parts, ignore_index=True)
+
+
+def _sprint_row(scored: ScoredSprint, items: pd.DataFrame, *, run_id, now, key, status, day1, data_as_of, trained_at):
     s = scored.sprint
     committed = float(s["committed_points"])
-    done_points = float((items["points"] * items["done_now"]).sum())
     v = scored.velocity
     length = (s["end"] - s["start"]) / pd.Timedelta(days=1)
     elapsed = (now - s["start"]) / pd.Timedelta(days=1)
     return {
         "run_id": run_id, "run_at": now, "forecast_key": key,
         **{c: s[c] for c in ("sprint_id", "project", "team", "team_key", "iteration", "start", "end", "cutoff")},
-        "status": status, "basis": basis, "scored_as_of": t,
+        "status": status, "basis": "now", "scored_as_of": scored.t,
         "elapsed_share": float(np.clip(elapsed / length, 0.0, 1.0)) if length > 0 else math.nan,
         "n_items": int(s["n_items"]), "committed_points": committed, "n_unestimated": int(s["n_unestimated"]),
         "trailing_velocity": v, "load_ratio": committed / v if v > 0 else math.nan,
         **scored.summary,
-        "items_done_so_far": int(items["done_now"].sum()), "points_done_so_far": done_points,
-        "pct_done_so_far": done_points / committed if committed > 0 else math.nan,
+        "items_done_so_far": int(items["done_now"].sum()), "points_done_so_far": scored.done_points,
+        "pct_done_so_far": scored.done_points / committed if committed > 0 else math.nan,
         "data_as_of": data_as_of, "model_trained_at": trained_at,
+        "day1_expected": day1["expected"] if day1 else math.nan,
+        "day1_p10": day1["p10"] if day1 else math.nan,
+        "day1_p90": day1["p90"] if day1 else math.nan,
     }
 
 
 def export_forecasts(
     cache: CacheData, bundle: dict, out: Path, *, now=None, backtest_csv: Path | None = None,
 ) -> ExportResult:
-    """Forecast every running team sprint (scored at its commit cutoff) and each team's next sprint (scored on
-    its scope now). Appends sprint_forecasts/<run_id>.csv and item_forecasts/<run_id>.csv; replaces sprints.csv
-    (every reconstructed sprint and its outcome), items.csv (every committed or added item, who held it at the end
-    and its outcome), cycle.csv and cycle_states.csv (every finished item's cycle time and its time per state) and,
-    when `backtest_csv` exists, backtest.csv."""
+    """Forecast every running team sprint and each team's next sprint as they stand now, with the forecast at the
+    commit cutoff beside each running sprint that has passed it. Appends sprint_forecasts/<run_id>.csv and
+    item_forecasts/<run_id>.csv; replaces sprints.csv (every reconstructed sprint and its outcome), items.csv (every
+    committed or added item, who held it at the end and its outcome), cycle.csv and cycle_states.csv (every finished
+    item's cycle time and its time per state) and, when `backtest_csv` exists, backtest.csv."""
+    check_bundle(bundle)
     out = Path(out)
     now = pd.Timestamp.now(tz="UTC").floor("s") if now is None else to_utc(now)
     run_id = now.strftime("%Y%m%dT%H%M%SZ")
@@ -206,19 +243,23 @@ def export_forecasts(
     chosen = select_sprints(sprint_calendar(cache, settings["commit_grace_days"]), now)
     sprint_rows, item_frames = [], []
     for iteration, group in chosen.groupby("iteration", sort=False):
-        cutoff = group["cutoff"].iloc[0]
-        t, basis = (cutoff, "commit cutoff") if now >= cutoff else (now, "now")
         status = group.set_index("sprint_id")["status"]
-        for scored in score_iteration(fc, cache, history, iteration=iteration, t=t, **settings):
+        cutoff = group["cutoff"].iloc[0]
+        day1 = {}
+        if now >= cutoff:
+            day1 = {
+                sc.sprint["sprint_id"]: sc.summary
+                for sc in score_iteration(fc, cache, history, iteration=iteration, t=cutoff, **settings)
+            }
+        for scored in score_iteration(fc, cache, history, iteration=iteration, t=now, **settings):
             sid = scored.sprint["sprint_id"]
             if sid not in status.index:
                 continue
             key = f"{run_id}|{sid}"
-            progress = progress_at(cache, scored.items, now, settings["done_categories"])
-            items = _item_rows(fc, scored, progress, run_id, key)
+            items = _item_rows(fc, scored, cache, settings["done_categories"], run_id, key)
             item_frames.append(items)
             sprint_rows.append(_sprint_row(
-                scored, items, run_id=run_id, now=now, key=key, status=status[sid], basis=basis, t=t,
+                scored, items, run_id=run_id, now=now, key=key, status=status[sid], day1=day1.get(sid),
                 data_as_of=cache.extracted_at.get(scored.sprint["project"], pd.NaT), trained_at=trained_at,
             ))
     sprints = pd.DataFrame(sprint_rows, columns=SPRINT_FORECAST_COLUMNS)

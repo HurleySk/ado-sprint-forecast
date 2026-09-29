@@ -1,9 +1,11 @@
 import io
 import os
+import shutil
 import sys
 import tomllib
 from importlib.metadata import entry_points
 
+import joblib
 import pandas as pd
 import pytest
 from click.testing import CliRunner
@@ -106,7 +108,10 @@ def test_predict_past_sprint_as_of_commit_with_titles(workspace, monkeypatch):
     try:
         monkeypatch.setenv("ADO_PAT", "not-a-real-token")
         monkeypatch.setattr(cli, "fetch_titles", lambda fetch, org, ids: {i: f"Synthetic item {i}" for i in ids})
-        result = run(workspace, "predict", "--iteration", "Alpha\\Sprint 12", "--team", "Team Blue", "--top", "2")
+        result = run(
+            workspace, "predict", "--iteration", "Alpha\\Sprint 12", "--team", "Team Blue", "--as-of", "commit",
+            "--top", "2",
+        )
     finally:
         (workspace / ".sprint-forecast" / "config.toml").unlink()
     assert result.exit_code == 0, result.output
@@ -116,15 +121,52 @@ def test_predict_past_sprint_as_of_commit_with_titles(workspace, monkeypatch):
     assert result.output.count("p=") == 2
 
 
-def test_predict_auto_uses_now_before_cutoff(workspace, capsys):
-    now = pd.Timestamp("2024-06-10T12:00:00Z")  # Alpha Sprint 12 starts 2024-06-10 05:00 UTC; cutoff is a day later
-    kwargs = dict(iteration="Alpha\\Sprint 12", team="Team Red", top=0, title_lookup=None)
-    early = cli._predict(workspace / ".sprint-forecast", as_of="auto", now=now, **kwargs)
-    assert "scored as of now (2024-06-10 12:00 UTC)" in capsys.readouterr().out
-    later = cli._predict(workspace / ".sprint-forecast", as_of="auto", now=now + pd.Timedelta(days=2), **kwargs)
-    assert "scored as of commit cutoff (2024-06-11 05:00 UTC)" in capsys.readouterr().out
-    assert len(early) == len(later) == 1
-    assert 0.0 <= early[0]["p_full"] <= early[0]["p_80"] <= 1.0
+def _predict_output(workspace, capsys, now, as_of="now", team="Team Red", top=0):
+    results = cli._predict(
+        workspace / ".sprint-forecast", iteration="Alpha\\Sprint 12", team=team, as_of=as_of, top=top,
+        title_lookup=None, now=pd.Timestamp(now),
+    )
+    return results, capsys.readouterr().out
+
+
+def test_predict_before_the_cutoff_scores_the_scope_now(workspace, capsys):
+    results, out = _predict_output(workspace, capsys, "2024-06-10T12:00:00Z")  # cutoff: 2024-06-11 05:00 UTC
+    assert "scored as of now (2024-06-10 12:00 UTC)" in out
+    assert "done so far" not in out and "day-1 forecast" not in out
+    assert len(results) == 1 and 0.0 <= results[0]["p_full"] <= results[0]["p_80"] <= 1.0
+
+
+def test_predict_mid_sprint_shows_done_so_far_and_the_day1_forecast(workspace, capsys):
+    results, out = _predict_output(workspace, capsys, "2024-06-14T12:00:00Z")
+    assert "scored as of now (2024-06-14 12:00 UTC)" in out
+    assert "done so far:" in out and "day-1 forecast: expected" in out
+    _, commit = _predict_output(workspace, capsys, "2024-06-14T12:00:00Z", as_of="commit")
+    assert "scored as of commit cutoff (2024-06-11 05:00 UTC)" in commit and "day-1 forecast" not in commit
+
+
+def test_predict_marks_added_items(workspace, capsys):
+    # seed 5: item 1326 joined Team Blue's Sprint 12 on 2024-06-13 and stays open past the sprint's end
+    _, out = _predict_output(workspace, capsys, "2024-06-14T12:00:00Z", team="Team Blue", top=100)
+    line = next(text for text in out.splitlines() if "#1326  " in text)
+    assert line.rstrip().endswith("pts  added")
+
+
+def test_predict_after_the_sprint_scores_it_at_its_end(workspace, capsys):
+    results, out = _predict_output(workspace, capsys, "2024-07-01T00:00:00Z")
+    assert "scored as of sprint end (2024-06-24 04:59 UTC)" in out
+    assert results[0]["p10"] == results[0]["p90"]
+
+
+def test_predict_and_export_with_an_old_model_ask_to_retrain(workspace, tmp_path):
+    workdir = tmp_path / ".sprint-forecast"
+    workdir.mkdir()
+    shutil.copy(workspace / ".sprint-forecast" / "cache.db", workdir / "cache.db")
+    bundle = joblib.load(workspace / ".sprint-forecast" / "model.joblib")
+    bundle.pop("feature_version")
+    joblib.dump(bundle, workdir / "model.joblib")
+    for args in (("predict", "--iteration", "Alpha\\Sprint 12", "--no-titles"), ("export", "--out", str(tmp_path))):
+        result = CliRunner().invoke(cli.main, ["--root", str(tmp_path), *args])
+        assert result.exit_code != 0 and "older version; run `sprint-forecast train`" in result.output
 
 
 def test_predict_shared_iteration_without_team_prints_each_team(workspace):
@@ -225,7 +267,7 @@ def test_export_lists_each_forecast(workspace, tmp_path, capsys):
     now = pd.Timestamp("2024-06-12T12:00:00Z")  # Alpha Sprint 12 is running
     result = cli._export(workspace / ".sprint-forecast", tmp_path, now=now)
     output = capsys.readouterr().out
-    assert "Alpha/Team Red | Alpha\Sprint 12: running, scored as of commit cutoff" in output
+    assert "Alpha/Team Red | Alpha\Sprint 12: running, scored as of now" in output
     assert f"Wrote {len(result.files)} files to {tmp_path}" in output
 
 

@@ -31,7 +31,7 @@ from sprint_forecast.config import (
 from sprint_forecast.export import export_forecasts, write_csv
 from sprint_forecast.extract import PROJECT_ERRORS, describe_error, extract_all
 from sprint_forecast.features import FEATURE_VERSION, build_checkpoint_frame
-from sprint_forecast.forecast import score_iteration
+from sprint_forecast.forecast import check_bundle, score_iteration
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.rollup import fit_forecaster
 from sprint_forecast.sprints import SprintData, build_sprints, data_report, sprint_calendar
@@ -113,7 +113,8 @@ def format_data_report(report: dict) -> str:
         f"Sprints not ended at extraction (outcome unknown, not used for training): {report['open_sprints']}",
         f"Committed items: {report['n_committed_items']}; unestimated share {_pct(report['unestimated_share'])}",
         f"Unassigned items (no unique team match, excluded): {report['unassigned_items']}",
-        f"Items added mid-sprint (after the commit cutoff, excluded): {report['added_mid_sprint']}",
+        f"Items added mid-sprint (after the commit cutoff; scored per item, not part of committed scope): "
+        f"{report['added_mid_sprint']}",
         "Done-state mix at sprint end: "
         + (", ".join(f"{k} {v}" for k, v in sorted(report["end_state_mix"].items())) or "n/a"),
         f"Resolved share of Resolved+Completed at end: {_pct(report['resolved_share_of_resolved_or_completed'])}"
@@ -174,7 +175,12 @@ def _load_model(workdir: Path) -> dict:
     path = workdir / MODEL_FILE
     if not path.exists():
         raise click.ClickException(f"no model at {path}; run `sprint-forecast train` first")
-    return joblib.load(path)
+    bundle = joblib.load(path)
+    try:
+        check_bundle(bundle)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from None
+    return bundle
 
 
 def _title_lookup(root: Path) -> Callable[[list[int]], dict[int, str]] | None:
@@ -214,19 +220,24 @@ def _predict(
     group = cal[cal["iteration"] == iteration]
     if group.empty:
         raise click.ClickException(f"no team runs a dated iteration with path {iteration!r}")
-    cutoff = group["cutoff"].iloc[0]
+    cutoff, end = group["cutoff"].iloc[0], group["end"].iloc[0]
     now = pd.Timestamp.now(tz="UTC") if now is None else now
-    if as_of == "now" or (as_of == "auto" and now < cutoff):
-        t, label = now, "now"
-    else:
-        t, label = cutoff, "commit cutoff"
+    t = cutoff if as_of == "commit" else now
+    kwargs = dict(
+        iteration=iteration, work_item_types=s.work_item_types, done_categories=s.done_categories,
+        commit_grace_days=s.commit_grace_days, team=team,
+    )
     try:
-        scored = score_iteration(
-            fc, cache, history, iteration=iteration, t=t, work_item_types=s.work_item_types,
-            done_categories=s.done_categories, commit_grace_days=s.commit_grace_days, team=team,
-        )
+        scored = score_iteration(fc, cache, history, t=t, **kwargs)
+        day1 = {}
+        if as_of == "now" and now >= cutoff:
+            day1 = {
+                sc.sprint["sprint_id"]: sc.summary for sc in score_iteration(fc, cache, history, t=cutoff, **kwargs)
+            }
     except ValueError as e:
         raise click.ClickException(str(e)) from None
+    label = "commit cutoff" if as_of == "commit" else ("sprint end" if now >= end else "now")
+    t = min(t, end)
     if not scored:
         click.echo(f"No committed items in {iteration} as of {label} ({t:%Y-%m-%d %H:%M} UTC).")
         return []
@@ -239,17 +250,21 @@ def _predict(
     results = []
     for sc in scored:
         srow, summary, v = sc.sprint, sc.summary, sc.velocity
+        committed = float(srow["committed_points"])
         click.echo(f"\n{srow['team_key']} | {iteration}")
         click.echo(
             f"  window {srow['start']:%Y-%m-%d} .. {srow['end']:%Y-%m-%d} UTC; "
-            f"scored as of {label} ({t:%Y-%m-%d %H:%M} UTC)"
+            f"scored as of {label} ({sc.t:%Y-%m-%d %H:%M} UTC)"
         )
         click.echo(
-            f"  committed: {int(srow['n_items'])} items, {srow['committed_points']:.1f} points "
+            f"  committed: {int(srow['n_items'])} items, {committed:.1f} points "
             f"({int(srow['n_unestimated'])} unestimated)"
         )
+        if sc.t >= cutoff:
+            share = sc.done_points / committed if committed > 0 else math.nan
+            click.echo(f"  done so far: {sc.done_points:.1f} of {committed:.1f} points ({_pct(share)})")
         if v > 0:
-            click.echo(f"  load: {srow['committed_points'] / v:.2f}x trailing velocity ({v:.1f} points)")
+            click.echo(f"  load: {committed / v:.2f}x trailing velocity ({v:.1f} points)")
         else:
             click.echo("  load: n/a (no velocity history for this team)")
         click.echo(
@@ -257,6 +272,12 @@ def _predict(
             f"expected {_pct(summary['expected'])}   p10/p50/p90 "
             f"{_pct(summary['p10'])} / {_pct(summary['p50'])} / {_pct(summary['p90'])}"
         )
+        d1 = day1.get(srow["sprint_id"])
+        if d1:
+            click.echo(
+                f"  day-1 forecast: expected {_pct(d1['expected'])}, p10/p50/p90 "
+                f"{_pct(d1['p10'])} / {_pct(d1['p50'])} / {_pct(d1['p90'])}"
+            )
         risky = sc.items.sort_values("p", kind="mergesort").head(top)
         if len(risky):
             click.echo("  riskiest items:")
@@ -264,7 +285,8 @@ def _predict(
             for idx, r in risky.iterrows():
                 drivers = describe_drivers(contrib.loc[idx], r)
                 title = _truncate(titles.get(int(r["item_id"]), "")) if titles else ""
-                click.echo(f"    #{int(r['item_id'])}  p={r['p']:.2f}  {r['points']:.1f} pts  {title}".rstrip())
+                added = "  added" if r["is_added"] == 1 else ""
+                click.echo(f"    #{int(r['item_id'])}  p={r['p']:.2f}  {r['points']:.1f} pts{added}  {title}".rstrip())
                 if drivers:
                     click.echo(f"        why: {'; '.join(drivers)}")
         results.append({"sprint_id": srow["sprint_id"], **summary})
@@ -389,8 +411,9 @@ def train(root: Path, done_categories: str | None) -> None:
 @click.option("--iteration", required=True, help="Iteration path, e.g. 'Alpha\\Sprint 12'.")
 @click.option("--team", default=None, help="Only this team (default: every team running the iteration).")
 @click.option(
-    "--as-of", "as_of", type=click.Choice(["auto", "now", "commit"]), default="auto", show_default=True,
-    help="auto: the commit cutoff once it has passed, else now. now: current contents (done items drop out).",
+    "--as-of", "as_of", type=click.Choice(["now", "commit"]), default="now", show_default=True,
+    help="now: the sprint as it stands (done so far plus the forecast for what is still open; its end once over). "
+         "commit: the day-1 view at the commit cutoff.",
 )
 @click.option("--top", type=click.IntRange(min=0), default=5, show_default=True, help="Riskiest items to list.")
 @click.option("--titles/--no-titles", default=True, help="Fetch titles from ADO for display (never cached).")
