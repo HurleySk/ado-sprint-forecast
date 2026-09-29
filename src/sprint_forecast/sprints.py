@@ -16,8 +16,13 @@ SPRINT_COLUMNS = CALENDAR_COLUMNS + [
     "n_items", "committed_points", "done_points", "pct_done", "pct_done_count", "n_unestimated", "n_added_mid",
 ]
 ITEM_COLUMNS = CALENDAR_COLUMNS + [
-    "item_id", "type", "state_category_at_commit", "area", "assigned_to_sk", "parent_id", "created",
-    "last_changed", "revisions_so_far", "carryover_count", "raw_points", "points", "is_unestimated",
+    "item_id", "type", "state_category_at_commit", "area", "assigned_to_sk", "assigned_at_end_sk", "parent_id",
+    "created", "last_changed", "revisions_so_far", "carryover_count", "raw_points", "points", "is_unestimated",
+    "done", "state_category_at_end",
+]
+# Items that joined a sprint after its cutoff and were still in it at the end; as of the end, not the cutoff.
+ADDED_COLUMNS = CALENDAR_COLUMNS + [
+    "item_id", "type", "area", "assigned_to_sk", "carryover_count", "raw_points", "points", "is_unestimated",
     "done", "state_category_at_end",
 ]
 
@@ -27,6 +32,7 @@ class SprintData:
     sprints: pd.DataFrame
     items: pd.DataFrame
     report: dict = field(default_factory=dict)
+    added: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=ADDED_COLUMNS))
 
 
 def raw_points(frame: pd.DataFrame) -> pd.Series:
@@ -226,6 +232,7 @@ def build_sprints(
     ended_done = (e["iteration"].to_numpy() == c["iteration"].to_numpy()) & e["state_category"].isin(done).to_numpy()
     c["done"] = np.where(is_open, np.nan, ended_done.astype("float64"))
     c["state_category_at_end"] = np.where(is_open, None, e["state_category"].to_numpy())
+    c["assigned_at_end_sk"] = e["assigned_to_sk"].to_numpy()
 
     target = pairs["target"].to_numpy()
     added_mask = (
@@ -233,13 +240,12 @@ def build_sprints(
         & (at_e["iteration"].to_numpy() == target)
         & at_e["type"].isin(types).to_numpy()
         & (at_e["state_category"] != REMOVED).to_numpy()
+        & ~at_c["state_category"].isin(done).to_numpy()  # finished before the sprint: not this sprint's work
     )
-    added = pairs.loc[added_mask]
-    added_team = assign(at_e.loc[added_mask, "area"], added["target"], added["project"])
-    added_ids = (added["project"] + "/" + added_team + "|" + added["target"])[added_team.notna()]
 
     items = _finish_items(c, None) if len(c) else pd.DataFrame(columns=ITEM_COLUMNS)
-    sprints = summarize_sprints(items, added_ids.value_counts().to_dict())
+    added = _added(cache, pairs.loc[added_mask], at_e.loc[added_mask], assign, done, items)
+    sprints = summarize_sprints(items, added["sprint_id"].value_counts().to_dict())
     report = {
         "unassigned_items": n_unassigned,
         "added_mid_sprint": int(added_mask.sum()),
@@ -252,7 +258,35 @@ def build_sprints(
         "end_state_mix": items.loc[items["done"].notna(), "state_category_at_end"]
         .fillna("(missing)").value_counts().to_dict(),
     }
-    return SprintData(sprints, items, report)
+    return SprintData(sprints, items, report, added)
+
+
+def _added(
+    cache: CacheData, pairs: pd.DataFrame, at_e: pd.DataFrame, assign: _Assigner, done: set[str],
+    history_items: pd.DataFrame,
+) -> pd.DataFrame:
+    """Items added after the cutoff and still in the sprint at its end, described as of the end."""
+    if pairs.empty:
+        return pd.DataFrame(columns=ADDED_COLUMNS)
+    a = pairs[["item_id", "target", "project", "start", "end", "cutoff"]].copy()
+    a["type"] = at_e["type"].to_numpy()
+    a["area"] = at_e["area"].to_numpy()
+    a["assigned_to_sk"] = at_e["assigned_to_sk"].to_numpy()
+    a["raw_points"] = raw_points(at_e).to_numpy()
+    state = at_e["state_category"].to_numpy()
+    a["team"] = assign(a["area"], a["target"], a["project"])
+    keep = a["team"].notna().to_numpy()
+    a, state = a[keep].rename(columns={"target": "iteration"}), state[keep]
+    if a.empty:
+        return pd.DataFrame(columns=ADDED_COLUMNS)
+    a["team_key"] = a["project"] + "/" + a["team"]
+    a["sprint_id"] = a["team_key"] + "|" + a["iteration"]
+    a["carryover_count"] = _carryover(cache.revisions, a.assign(cutoff=a["end"]), _iteration_end_map(cache))
+    is_open = (a["end"] > _horizon(cache, a["project"])).to_numpy()
+    a["done"] = np.where(is_open, np.nan, pd.Series(state).isin(done).to_numpy().astype("float64"))
+    a["state_category_at_end"] = np.where(is_open, None, state)
+    a = impute_points(a, history_items if len(history_items) else a)
+    return a[ADDED_COLUMNS].sort_values(["start", "sprint_id", "item_id"], kind="mergesort").reset_index(drop=True)
 
 
 def scope_at(
@@ -282,7 +316,7 @@ def scope_at(
         c = c[c["team"] == team]
     if c.empty:
         return pd.DataFrame(columns=SPRINT_COLUMNS), pd.DataFrame(columns=ITEM_COLUMNS)
-    c = c.assign(done=np.nan, state_category_at_end=None)
+    c = c.assign(done=np.nan, state_category_at_end=None, assigned_at_end_sk=None)
     items = _finish_items(c, history.items)
     return summarize_sprints(items), items
 

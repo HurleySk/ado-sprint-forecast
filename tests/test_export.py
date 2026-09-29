@@ -151,19 +151,24 @@ def test_assignee_names_are_blank_when_unassigned_and_flag_unknown_keys():
     assert names.tolist() == ["Pat Example", None, "Unknown user", "Sam Sample"]
 
 
-def test_export_writes_every_committed_item_with_its_assignee(exported, synth16):
+def test_export_writes_every_committed_and_added_item_with_whoever_held_it_at_the_end(exported, synth16):
     out, _, _ = exported
     items = pd.read_csv(out / "items.csv")
     assert list(items.columns) == ITEM_HISTORY_COLUMNS
-    history = synth16.sprints.items
-    assert items["item_id"].tolist() == history["item_id"].tolist()
     names = dict(zip(synth16.cache.users["user_sk"], synth16.cache.users["name"]))
-    assert items["assignee"].fillna("").tolist() == history["assigned_to_sk"].map(names).fillna("").tolist()
+    committed, added = items[~items["added_mid"]], items[items["added_mid"]]
+    history, history_added = synth16.sprints.items, synth16.sprints.added
+    assert committed["item_id"].tolist() == history["item_id"].tolist()
+    assert committed["assignee"].fillna("").tolist() == history["assigned_at_end_sk"].map(names).fillna("").tolist()
+    assert len(added) == len(history_added) > 0
+    assert sorted(zip(added["sprint_id"], added["item_id"])) == sorted(
+        zip(history_added["sprint_id"], history_added["item_id"]))
     assert items["assignee"].isna().any() and items["assignee"].nunique() >= 8
     outcomes = pd.read_csv(out / "sprints.csv").set_index("sprint_id")
     closed = outcomes.index[outcomes["done_points"].notna()]
-    done = items.assign(w=items["points"] * items["done"]).groupby("sprint_id")["w"].sum()
+    done = committed.assign(w=committed["points"] * committed["done"]).groupby("sprint_id")["w"].sum()
     assert done[closed].to_numpy() == pytest.approx(outcomes.loc[closed, "done_points"].to_numpy())
+    assert added.groupby("sprint_id").size().to_dict() == outcomes.loc[outcomes["n_added_mid"] > 0, "n_added_mid"].to_dict()
     assert items.loc[items["sprint_id"].isin(closed), "done"].isin([0, 1]).all()
     assert items.loc[~items["sprint_id"].isin(closed), "done"].isna().all()
 

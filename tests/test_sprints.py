@@ -6,6 +6,7 @@ import pytest
 from helpers import build_cache, iteration, rev, team
 from sprint_forecast.features import build_features
 from sprint_forecast.sprints import (
+    ADDED_COLUMNS,
     ITEM_COLUMNS,
     SPRINT_COLUMNS,
     build_sprints,
@@ -47,6 +48,45 @@ def test_committed_vs_added_after_cutoff(tmp_path):
     assert sd.sprints.set_index("sprint_id").loc[SPRINT1, "n_added_mid"] == 1
     assert list(sd.sprints.columns) == SPRINT_COLUMNS
     assert list(sd.items.columns) == ITEM_COLUMNS
+
+
+def test_items_added_after_cutoff_are_listed_with_outcome_and_end_holder(tmp_path):
+    late = "2024-03-12T00:00:00.000Z"
+    sd, _ = build(tmp_path, [
+        rev(1, 1, PLAN, iteration="Alpha\\Sprint 1"),
+        rev(6, 1, "2024-02-01T00:00:00.000Z", iteration="Alpha\\Sprint 0"),  # gives the team a prior median of 3
+        rev(2, 1, PRE, story_points=None),
+        rev(2, 2, MID, iteration="Alpha\\Sprint 1", assigned_to_sk="u1", story_points=None),
+        rev(2, 3, late, iteration="Alpha\\Sprint 1", assigned_to_sk="u2", story_points=None,
+            state="Closed", state_category="Completed"),
+        rev(3, 1, PRE),
+        rev(3, 2, MID, iteration="Alpha\\Sprint 1"),
+        rev(3, 3, late, iteration="Alpha\\Sprint 1", state="Removed", state_category="Removed"),
+        rev(4, 1, PRE, state="Closed", state_category="Completed"),
+        rev(4, 2, MID, iteration="Alpha\\Sprint 1", state="Closed", state_category="Completed"),
+        rev(5, 1, PRE, type="Bug"),
+        rev(5, 2, MID, iteration="Alpha\\Sprint 1", type="Bug", story_points=5.0),
+    ])
+    added = sd.added.set_index("item_id")
+    assert list(sd.added.columns) == ADDED_COLUMNS
+    assert sorted(added.index) == [2, 5]  # removed (3) and already done before the sprint (4) are not added work
+    assert added.loc[2, "sprint_id"] == SPRINT1 and added.loc[2, "assigned_to_sk"] == "u2"
+    assert added["done"].to_dict() == {2: True, 5: False}
+    assert added.loc[2, "is_unestimated"] and added.loc[2, "points"] == 3.0  # the team's prior median
+    assert added.loc[5, "points"] == 5.0 and not added.loc[5, "is_unestimated"]
+    assert sd.sprints.set_index("sprint_id").loc[SPRINT1, "n_added_mid"] == 2
+    assert sd.report["added_mid_sprint"] == 2
+
+
+def test_committed_items_record_who_held_them_at_sprint_end(tmp_path):
+    sd, _ = build(tmp_path, [
+        rev(1, 1, PLAN, iteration="Alpha\\Sprint 1", assigned_to_sk="u1"),
+        rev(1, 2, MID, iteration="Alpha\\Sprint 1", assigned_to_sk="u2"),
+        rev(2, 1, PLAN, iteration="Alpha\\Sprint 1", assigned_to_sk="u1"),
+    ])
+    items = items_of(sd)
+    assert items["assigned_to_sk"].to_dict() == {1: "u1", 2: "u1"}
+    assert items["assigned_at_end_sk"].to_dict() == {1: "u2", 2: "u1"}
 
 
 def test_moved_out_mid_sprint_is_not_done(tmp_path):

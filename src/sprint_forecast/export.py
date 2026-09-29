@@ -38,7 +38,7 @@ ITEM_FORECAST_COLUMNS = [
     "state_category_now", "in_sprint_now", "done_now",
 ]
 ITEM_HISTORY_COLUMNS = [
-    "sprint_id", "item_id", "type", "points", "is_unestimated", "carryover_count", "assignee", "done",
+    "sprint_id", "item_id", "type", "points", "is_unestimated", "carryover_count", "added_mid", "assignee", "done",
     "state_category_at_end",
 ]
 UNKNOWN_USER = "Unknown user"
@@ -106,20 +106,26 @@ def assignee_names(keys: pd.Series, users: pd.DataFrame) -> pd.Series:
 
 
 def item_history(history, users: pd.DataFrame) -> pd.DataFrame:
-    """Every item committed to a reconstructed sprint, with who held it at the commit cutoff and whether it was
-    done by the end (empty until the sprint ends)."""
-    items = history.items
-    return pd.DataFrame({
-        "sprint_id": items["sprint_id"],
-        "item_id": items["item_id"].astype("int64"),
-        "type": items["type"],
-        "points": items["points"],
-        "is_unestimated": items["is_unestimated"].astype(bool),
-        "carryover_count": items["carryover_count"].astype("int64"),
-        "assignee": assignee_names(items["assigned_to_sk"], users),
-        "done": items["done"],
-        "state_category_at_end": items["state_category_at_end"],
-    })[ITEM_HISTORY_COLUMNS]
+    """Every item in a reconstructed sprint: committed at the cutoff, or added after it and still there at the end
+    (added_mid). Each with who held it at the sprint's end and whether it was done by then (empty until it ends)."""
+    def rows(items: pd.DataFrame, holder: str, added: bool) -> pd.DataFrame:
+        return pd.DataFrame({
+            "start": items["start"],
+            "sprint_id": items["sprint_id"],
+            "item_id": items["item_id"].astype("int64"),
+            "type": items["type"],
+            "points": items["points"],
+            "is_unestimated": items["is_unestimated"].astype(bool),
+            "carryover_count": items["carryover_count"].astype("int64"),
+            "added_mid": added,
+            "assignee": assignee_names(items[holder], users),
+            "done": items["done"].astype("float64"),
+            "state_category_at_end": items["state_category_at_end"],
+        })
+    frames = [rows(history.items, "assigned_at_end_sk", False), rows(history.added, "assigned_to_sk", True)]
+    out = pd.concat([f for f in frames if len(f)], ignore_index=True) if any(len(f) for f in frames) else frames[0]
+    out = out.sort_values(["start", "sprint_id", "added_mid", "item_id"], kind="mergesort")
+    return out[ITEM_HISTORY_COLUMNS].reset_index(drop=True)
 
 
 def _item_rows(fc, scored: ScoredSprint, progress: pd.DataFrame, run_id: str, key: str) -> pd.DataFrame:
@@ -169,7 +175,7 @@ def export_forecasts(
 ) -> ExportResult:
     """Forecast every running team sprint (scored at its commit cutoff) and each team's next sprint (scored on
     its scope now). Appends sprint_forecasts/<run_id>.csv and item_forecasts/<run_id>.csv; replaces sprints.csv
-    (every reconstructed sprint and its outcome), items.csv (every committed item, its assignee and outcome) and,
+    (every reconstructed sprint and its outcome), items.csv (every committed or added item, who held it at the end and its outcome) and,
     when `backtest_csv` exists, backtest.csv."""
     out = Path(out)
     now = pd.Timestamp.now(tz="UTC").floor("s") if now is None else to_utc(now)

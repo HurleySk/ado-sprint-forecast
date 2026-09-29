@@ -46,7 +46,7 @@ put for the rest of the sprint) and each team's next sprint (scored on the scope
 | `sprint_forecasts/<run_id>.csv` | run x team sprint | status, committed items and points, load vs velocity, P(full), P(>=80%), expected, p10/p50/p90, share done so far |
 | `item_forecasts/<run_id>.csv` | run x committed item | work item ID, points, probability of done, top 3 risk factors, state now, done so far |
 | `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends) |
-| `items.csv` | reconstructed sprint x committed item | points, sprints already carried over, assignee at the commit cutoff (display name), done (empty until the sprint ends) |
+| `items.csv` | reconstructed sprint x item in it | points, sprints already carried over, added after the commit cutoff or not, assignee at the sprint's end (display name), done (empty until the sprint ends) |
 | `backtest.csv` | backtested sprint and model | predicted band vs actual, copied from the last `backtest` run |
 
 Forecast files are added per run and never rewritten, so the history (progress against the day-1 forecast)
@@ -54,8 +54,11 @@ builds up; `sprints.csv`, `items.csv` and `backtest.csv` are replaced. Files are
 sync client or a refresh never reads half a file. Timestamps are UTC (`2024-06-10T05:00:00Z`).
 
 The files carry no titles; join `item_id` to Azure DevOps (e.g. the Analytics OData `WorkItems` feed) for them.
-`items.csv` names who held each item when the sprint was committed, for delivery by person; items with no
-assignee are left blank, and a user key Analytics has no name for reads `Unknown user`. A typical schedule: `extract` then `export` daily, `train` and `backtest` weekly,
+`items.csv` lists every item committed at the cutoff and, flagged `added_mid`, every item added after it that
+was still in the sprint at the end (unless it was already done before the sprint), so throughput counts all the
+work a sprint finished. Committed rows match `sprints.csv`, which covers committed scope only. Each row names
+who held the item at the sprint's end, for delivery by person; items with no assignee are left blank, and a user
+key Analytics has no name for reads `Unknown user`. A typical schedule: `extract` then `export` daily, `train` and `backtest` weekly,
 with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI reads with its folder connector.
 
 ## How it works
