@@ -4,7 +4,7 @@ import pytest
 from sklearn.metrics import roc_auc_score
 
 from sprint_forecast import model as model_module
-from sprint_forecast.features import FEATURES
+from sprint_forecast.features import DAY1_FEATURES as FEATURES
 from sprint_forecast.model import (
     P_CLIP,
     contributions,

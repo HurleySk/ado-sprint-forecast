@@ -1,26 +1,39 @@
-"""Feature matrix at the commit cutoff. Team history uses only sprints with end < this sprint's start."""
+"""Feature matrices. The day-1 frame describes committed items at the commit cutoff; the checkpoint frame describes
+items open at any time t in a sprint. Team history uses only sprints with end < this sprint's start."""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
+from sprint_forecast.cache import CacheData
+from sprint_forecast.checkpoints import CHECKPOINTS, build_checkpoint_rows
 from sprint_forecast.sprints import SprintData
 
-CATEGORICAL = ["type", "state_category_at_commit"]
 MISSING = "(missing)"
+CATEGORICAL = ["type", "state_category"]
 ITEM_FEATURES = [
-    "type", "state_category_at_commit", "points", "points_rel", "is_unestimated", "carryover_count",
-    "age_days", "days_since_change", "revisions_so_far", "has_parent",
+    "type", "state_category", "points", "points_rel", "is_unestimated", "carryover_count",
+    "age_days", "days_since_change", "revisions_so_far", "has_parent", "is_unassigned",
 ]
 SPRINT_FEATURES = [
     "load_ratio", "n_items", "bug_share", "carryover_share", "unestimated_share",
     "team_trailing_completion", "sprint_length_days", "team_sprint_index",
 ]
-ASSIGNEE_FEATURES = ["assignee_load_ratio", "is_unassigned"]
-FEATURES = ITEM_FEATURES + SPRINT_FEATURES + ASSIGNEE_FEATURES
+ASSIGNEE_FEATURES = ["assignee_load_ratio"]
+PROGRESS_FEATURES = ["elapsed", "days_left", "done_share", "days_in_state", "n_state_changes", "is_added", "reassigned"]
+FEATURES = ITEM_FEATURES + SPRINT_FEATURES + ASSIGNEE_FEATURES + PROGRESS_FEATURES
 NUMERIC = [f for f in FEATURES if f not in CATEGORICAL]
+# The day-1 frame's features (model A before 0.2.0); it still supplies sprint context and assignee load.
+DAY1_FEATURES = [
+    "type", "state_category_at_commit", "points", "points_rel", "is_unestimated", "carryover_count",
+    "age_days", "days_since_change", "revisions_so_far", "has_parent",
+] + SPRINT_FEATURES + ["assignee_load_ratio", "is_unassigned"]
 ID_COLUMNS = ["sprint_id", "project", "team", "team_key", "iteration", "start", "end", "cutoff", "item_id"]
-FEATURE_FRAME_COLUMNS = ID_COLUMNS + FEATURES + ["y"]
+FEATURE_FRAME_COLUMNS = ID_COLUMNS + DAY1_FEATURES + ["y"]
+CHECKPOINT_FRAME_COLUMNS = (
+    ID_COLUMNS + ["checkpoint", "t", "state_category_at_commit", "points_at_commit"] + FEATURES + ["y"]
+)
+FEATURE_VERSION = 2  # stored in the model bundle; bump when FEATURES or their meaning change
 
 VELOCITY_WINDOW = 3
 COMPLETION_WINDOW = 5
@@ -129,3 +142,65 @@ def build_features_for(
 
 def build_features(sd: SprintData) -> pd.DataFrame:
     return build_features_for(sd.sprints, sd.items, sd.sprints, sd.items)
+
+
+def build_checkpoint_features(rows: pd.DataFrame, day1: pd.DataFrame, history_sprints: pd.DataFrame) -> pd.DataFrame:
+    """Model features of open rows (checkpoints.open_rows or build_checkpoint_rows): the item as of each row's t,
+    its sprint's plan and its assignee's load at the cutoff (from `day1`, the day-1 frame of the same sprints; NaN
+    for items added after the cutoff), and the sprint's progress at t. Row order follows `rows`."""
+    rows = rows.reset_index(drop=True)
+    if rows.empty:
+        return pd.DataFrame(columns=CHECKPOINT_FRAME_COLUMNS)
+    targets = rows.drop_duplicates("sprint_id")[["sprint_id", "team_key", "start"]]
+    hist = team_history(targets, history_sprints).set_index("sprint_id")
+    sid, t, cutoff = rows["sprint_id"], rows["t"], rows["cutoff"]
+    velocity = sid.map(hist["trailing_velocity"])
+    velocity = velocity.where(velocity > 0)
+    out = rows[ID_COLUMNS].copy()
+    out["checkpoint"] = rows["checkpoint"].astype("float64") if "checkpoint" in rows else np.nan
+    out["t"] = t
+    out["state_category_at_commit"] = rows["state_category_at_commit"]
+    out["points_at_commit"] = rows["points_at_commit"].astype("float64")
+    out["type"] = rows["type"].fillna(MISSING).astype(str)
+    out["state_category"] = rows["state_category"].fillna(MISSING).astype(str)
+    out["points"] = rows["points"].astype(float)
+    out["points_rel"] = out["points"] / velocity
+    out["is_unestimated"] = rows["is_unestimated"].astype(float)
+    out["carryover_count"] = rows["carryover_count"].astype(float)
+    out["age_days"] = (t - rows["created"]) / DAY
+    out["days_since_change"] = (t - rows["last_changed"]) / DAY
+    out["revisions_so_far"] = rows["revisions_so_far"].astype(float)
+    out["has_parent"] = rows["parent_id"].notna().astype(float)
+    out["is_unassigned"] = rows["assigned_to_sk"].isna().astype(float)
+    plan = day1.drop_duplicates("sprint_id").set_index("sprint_id")
+    for col in SPRINT_FEATURES:
+        out[col] = sid.map(plan[col]).astype(float)
+    load = day1.assign(item_id=day1["item_id"].astype("int64")).set_index(["sprint_id", "item_id"])
+    keys = pd.MultiIndex.from_arrays([sid, rows["item_id"].astype("int64")])
+    out["assignee_load_ratio"] = load["assignee_load_ratio"].reindex(keys).to_numpy(dtype=float)
+    span = rows["end"] - cutoff
+    elapsed = (t - cutoff) / span.where(span > pd.Timedelta(0))
+    out["elapsed"] = elapsed.clip(0.0, 1.0).fillna((t >= cutoff).astype(float))
+    out["days_left"] = ((rows["end"] - t.where(t > cutoff, cutoff)) / DAY).clip(lower=0.0)
+    committed = rows["committed_points"].astype(float)
+    out["done_share"] = (rows["done_points_at_t"].astype(float) / committed.where(committed > 0)).fillna(0.0)
+    out["days_in_state"] = (t - rows["state_changed"]) / DAY
+    for col in ("n_state_changes", "is_added", "reassigned"):
+        out[col] = rows[col].astype(float)
+    out["y"] = rows["y"].astype("float64")
+    return out[CHECKPOINT_FRAME_COLUMNS]
+
+
+def build_checkpoint_frame(
+    cache: CacheData,
+    sd: SprintData,
+    *,
+    work_item_types,
+    done_categories,
+    checkpoints=CHECKPOINTS,
+) -> pd.DataFrame:
+    """Checkpoint features of every sprint in `sd` at each checkpoint: the frame model A trains and backtests on."""
+    rows = build_checkpoint_rows(
+        cache, sd, work_item_types=work_item_types, done_categories=done_categories, checkpoints=checkpoints,
+    )
+    return build_checkpoint_features(rows, build_features(sd), sd.sprints)

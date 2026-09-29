@@ -4,12 +4,18 @@ import math
 import pandas as pd
 import pytest
 
+from helpers import build_cache, iteration, rev, team
 from sprint_forecast.cache import connect, load_cache
+from sprint_forecast.checkpoints import open_rows
 from sprint_forecast.features import (
+    CHECKPOINT_FRAME_COLUMNS,
+    DAY1_FEATURES,
     FEATURE_FRAME_COLUMNS,
     FEATURES,
     ID_COLUMNS,
     assignee_load,
+    build_checkpoint_features,
+    build_checkpoint_frame,
     build_features,
     team_history,
 )
@@ -129,7 +135,7 @@ def test_revisions_after_cutoff_do_not_change_features(synth_cache):
     )
     cache = dataclasses.replace(synth_cache, revisions=pd.concat([revs, late], ignore_index=True))
     _, after = _features(cache)
-    cols = ID_COLUMNS + FEATURES
+    cols = ID_COLUMNS + DAY1_FEATURES
     b = before[before["sprint_id"] == target["sprint_id"]][cols].reset_index(drop=True)
     a = after[after["sprint_id"] == target["sprint_id"]][cols].reset_index(drop=True)
     pd.testing.assert_frame_equal(b, a)
@@ -137,3 +143,74 @@ def test_revisions_after_cutoff_do_not_change_features(synth_cache):
     early = late.assign(changed=target["cutoff"] - pd.Timedelta(minutes=1))
     _, moved = _features(dataclasses.replace(synth_cache, revisions=pd.concat([revs, early], ignore_index=True)))
     assert (moved["sprint_id"] == target["sprint_id"]).sum() < len(b)
+
+
+def _checkpoint_frame(cache, checkpoints=(0.5,)):
+    sd = build_sprints(cache, work_item_types=TYPES)
+    frame = build_checkpoint_frame(cache, sd, work_item_types=TYPES, done_categories=["Completed"],
+                                   checkpoints=checkpoints)
+    return sd, frame
+
+
+def test_at_the_cutoff_checkpoint_features_equal_the_day1_features(synth16):
+    ck = synth16.ckpt[synth16.ckpt["checkpoint"] == 0.0].reset_index(drop=True)
+    day1 = synth16.frame.reset_index(drop=True)
+    assert list(synth16.ckpt.columns) == CHECKPOINT_FRAME_COLUMNS
+    shared = [f for f in FEATURES if f in DAY1_FEATURES]
+    pd.testing.assert_frame_equal(ck[ID_COLUMNS + shared], day1[ID_COLUMNS + shared], check_dtype=False)
+    assert (ck["state_category"] == day1["state_category_at_commit"]).all()
+    assert (ck[["is_added", "reassigned", "done_share", "elapsed"]] == 0.0).all().all()
+    pd.testing.assert_series_equal(ck["y"], day1["y"], check_names=False)
+
+
+def test_later_checkpoints_have_added_items_and_progress(synth16):
+    late = synth16.ckpt[synth16.ckpt["checkpoint"] == 0.75]
+    assert (late["is_added"] == 1.0).any() and (late["done_share"] > 0).any()
+    added = late[late["is_added"] == 1.0]
+    assert added["assignee_load_ratio"].isna().all() and added["points_at_commit"].isna().all()
+    assert late["elapsed"].to_numpy() == pytest.approx(0.75)
+
+
+def test_revisions_after_t_do_not_change_checkpoint_features(synth_cache):
+    sd, before = _checkpoint_frame(synth_cache)
+    target = sd.sprints[sd.sprints["team"] == "Team Red"].iloc[5]
+    rows = before[before["sprint_id"] == target["sprint_id"]]
+    assert len(rows) > 0
+    t = rows["t"].iloc[0]
+    revs = synth_cache.revisions
+    last = revs[revs["item_id"].isin(rows["item_id"])].sort_values(["item_id", "rev"]).drop_duplicates(
+        "item_id", keep="last")
+    late = last.assign(
+        rev=last["rev"] + 1, changed=t + pd.Timedelta(hours=1),
+        state="Closed", state_category="Completed", story_points=99.0, assigned_to_sk="late-person",
+    )
+    _, after = _checkpoint_frame(dataclasses.replace(synth_cache, revisions=pd.concat([revs, late], ignore_index=True)))
+    cols = ID_COLUMNS + ["checkpoint", "t"] + FEATURES
+    b = rows[cols].reset_index(drop=True)
+    a = after[after["sprint_id"] == target["sprint_id"]][cols].reset_index(drop=True)
+    pd.testing.assert_frame_equal(b, a)
+    # control: the same edits one minute before t close the items, so they are no longer open rows
+    early = late.assign(changed=t - pd.Timedelta(minutes=1))
+    _, moved = _checkpoint_frame(dataclasses.replace(synth_cache, revisions=pd.concat([revs, early], ignore_index=True)))
+    assert (moved["sprint_id"] == target["sprint_id"]).sum() < len(b)
+
+
+def test_progress_features_before_the_cutoff_and_after_the_end(tmp_path):
+    s1 = iteration("Alpha\\Sprint 1", "2024-03-04T05:00:00.000Z", "2024-03-18T04:59:59.999Z")
+    red = team("Team Red", ["Alpha\\Red"], ["Alpha\\Sprint 1"])
+    cache = build_cache(tmp_path, [rev(1, 1, "2024-03-01T00:00:00.000Z", iteration="Alpha\\Sprint 1")], [s1], [red])
+    sd = build_sprints(cache, work_item_types=["User Story", "Bug"])
+    day1, s = build_features(sd), sd.sprints
+
+    def features_at(t):
+        rows = open_rows(cache, sd, s, pd.Series(pd.Timestamp(t), index=s.index),
+                         work_item_types=["User Story", "Bug"], done_categories=["Completed"])
+        return build_checkpoint_features(rows, day1, sd.sprints).iloc[0]
+
+    after_end = features_at("2024-03-19T05:00:00Z")
+    assert after_end["elapsed"] == 1.0 and after_end["days_left"] == 0.0
+    early = features_at("2024-03-04T18:00:00Z")
+    span_days = (s["end"].iloc[0] - s["cutoff"].iloc[0]) / DAY
+    assert early["elapsed"] == 0.0 and early["days_left"] == pytest.approx(span_days)
+    assert early["done_share"] == 0.0 and early["is_added"] == 0.0
+    assert early["days_in_state"] == pytest.approx(3.75) and early["age_days"] == pytest.approx(63.75)

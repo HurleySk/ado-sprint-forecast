@@ -13,7 +13,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from sprint_forecast.features import CATEGORICAL, FEATURES, MISSING, NUMERIC
+from sprint_forecast.features import DAY1_FEATURES as FEATURES, MISSING
+
+CATEGORICAL = ["type", "state_category_at_commit"]  # interim until model A trains on checkpoint rows
+NUMERIC = [f for f in FEATURES if f not in CATEGORICAL]
 
 LGBM_PARAMS = {
     "num_leaves": 15,

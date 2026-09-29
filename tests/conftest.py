@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 from sprint_forecast.cache import CacheData, connect, load_cache
-from sprint_forecast.features import build_features
+from sprint_forecast.checkpoints import checkpoint_progress
+from sprint_forecast.features import build_checkpoint_frame, build_features
 from sprint_forecast.sprints import SprintData, build_sprints
 from sprint_forecast.synth import generate
 
@@ -18,7 +19,9 @@ SYNTH_TYPES = ["User Story", "Product Backlog Item", "Bug"]
 class Synth:
     cache: CacheData
     sprints: SprintData
-    frame: pd.DataFrame
+    frame: pd.DataFrame  # day-1 feature frame (baseline C and the team-mean reference read it)
+    ckpt: pd.DataFrame  # checkpoint feature frame at CHECKPOINTS (model A trains on it)
+    progress: pd.DataFrame  # per sprint and checkpoint: t, committed points done by t, committed points
 
 
 def _synth(tmp_path_factory, seed: int, n_sprints: int) -> Synth:
@@ -27,7 +30,9 @@ def _synth(tmp_path_factory, seed: int, n_sprints: int) -> Synth:
     cache = load_cache(conn)
     conn.close()
     sd = build_sprints(cache, work_item_types=SYNTH_TYPES)
-    return Synth(cache, sd, build_features(sd))
+    ckpt = build_checkpoint_frame(cache, sd, work_item_types=SYNTH_TYPES, done_categories=["Completed"])
+    progress = checkpoint_progress(cache, sd, done_categories=["Completed"])
+    return Synth(cache, sd, build_features(sd), ckpt, progress)
 
 
 @pytest.fixture(scope="session")
