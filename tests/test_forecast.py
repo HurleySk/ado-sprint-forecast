@@ -61,6 +61,19 @@ def test_an_ended_sprint_is_scored_at_its_end_with_the_observed_outcome(fc, synt
     assert (sc.items["p"] == 0.0).all()
 
 
+def test_a_sprint_that_ended_after_the_last_extract_is_scored_at_the_extract(fc, tmp_path):
+    cache = build_cache(tmp_path, [
+        rev(1, 1, PRE, iteration=IT1),
+        rev(1, 2, "2024-03-08T00:00:00.000Z", iteration=IT1, state="Closed", state_category="Completed"),
+        rev(2, 1, PRE, iteration=IT1, story_points=5.0),
+    ], [S0, S1], [RED], meta={"extracted_at:Alpha": "2024-03-11T00:00:00.000Z"})
+    history = build_sprints(cache, work_item_types=TYPES, done_categories=DONE)
+    (sc,) = score(fc, cache, history, pd.Timestamp("2024-03-25T00:00:00Z"), iteration=IT1, types=TYPES)
+    assert sc.t == MID and sc.done_points == 3.0
+    assert 0.0 < sc.items.set_index("item_id").loc[2, "p"] < 1.0
+    assert 3 / 8 < sc.summary["expected"] < 1.0
+
+
 def test_a_sprint_with_nothing_left_open_is_a_point_mass_at_its_done_share(fc, tmp_path):
     cache = build_cache(tmp_path, [
         rev(1, 1, PRE, iteration=IT1),

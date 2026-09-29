@@ -236,9 +236,9 @@ def _predict(
             }
     except ValueError as e:
         raise click.ClickException(str(e)) from None
-    label = "commit cutoff" if as_of == "commit" else ("sprint end" if now >= end else "now")
     t = min(t, end)
     if not scored:
+        label = "commit cutoff" if as_of == "commit" else ("sprint end" if now >= end else "now")
         click.echo(f"No committed items in {iteration} as of {label} ({t:%Y-%m-%d %H:%M} UTC).")
         return []
     titles: dict[int, str] = {}
@@ -251,6 +251,10 @@ def _predict(
     for sc in scored:
         srow, summary, v = sc.sprint, sc.summary, sc.velocity
         committed = float(srow["committed_points"])
+        if as_of == "commit":
+            label = "commit cutoff"
+        else:  # score_iteration stops at the sprint's end, or at the last extract when the end is not in it yet
+            label = "sprint end" if sc.t >= end else ("now" if sc.t >= now else "last extract")
         click.echo(f"\n{srow['team_key']} | {iteration}")
         click.echo(
             f"  window {srow['start']:%Y-%m-%d} .. {srow['end']:%Y-%m-%d} UTC; "

@@ -11,7 +11,7 @@ from sprint_forecast.cache import CacheData
 from sprint_forecast.checkpoints import done_points_at, open_rows
 from sprint_forecast.features import FEATURE_VERSION, build_checkpoint_features, build_features_for, team_history
 from sprint_forecast.rollup import Forecaster, forecast_sprint, simulate_pct_done, summarize
-from sprint_forecast.sprints import SprintData, iteration_group, scope_at, sprint_calendar
+from sprint_forecast.sprints import SprintData, horizon, iteration_group, scope_at, sprint_calendar
 from sprint_forecast.timeline import to_utc
 
 OLD_MODEL = "model was trained by an older version; run `sprint-forecast train`"
@@ -46,13 +46,17 @@ def score_iteration(
     commit_grace_days: float,
     team: str | None = None,
 ) -> list[ScoredSprint]:
-    """Forecast each team sprint of `iteration` as it stands at `t` (its end, once that has passed). Committed
-    items done by t count as done, committed items still open are scored and simulated, and items added after the
-    cutoff are scored but stay out of the summary. Before the cutoff the committed scope is the iteration's open
-    items at t. Raises ValueError for an iteration no team runs, or a team that does not run it."""
+    """Forecast each team sprint of `iteration` as it stands at `t` (its end, once that has passed; the last
+    extract, when the sprint ended after it). Committed items done by t count as done, committed items still open
+    are scored and simulated, and items added after the cutoff are scored but stay out of the summary. Before the
+    cutoff the committed scope is the iteration's open items at t. Raises ValueError for an iteration no team runs,
+    or a team that does not run it."""
     group = iteration_group(sprint_calendar(cache, commit_grace_days), iteration, team)
     cutoff, end = group["cutoff"].iloc[0], group["end"].iloc[0]
     t = min(to_utc(t), end)
+    seen = horizon(cache, group["project"]).iloc[0]
+    if t >= end and seen < end:  # the outcome is not in the data yet
+        t = seen
     if t < cutoff:
         sprints, items = scope_at(
             cache, history, iteration=iteration, cutoff=t, work_item_types=work_item_types,

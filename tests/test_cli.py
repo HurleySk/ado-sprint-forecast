@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 from click.testing import CliRunner
 
+from helpers import build_cache, iteration, rev, team
 from sprint_forecast import cli
 from sprint_forecast.analytics import HttpError
 from sprint_forecast.cache import connect, load_cache
@@ -155,6 +156,23 @@ def test_predict_after_the_sprint_scores_it_at_its_end(workspace, capsys):
     results, out = _predict_output(workspace, capsys, "2024-07-01T00:00:00Z")
     assert "scored as of sprint end (2024-06-24 04:59 UTC)" in out
     assert results[0]["p10"] == results[0]["p90"]
+
+
+def test_predict_after_the_end_on_an_older_extract_says_it_scored_the_extract(workspace, tmp_path, capsys):
+    it0, it1 = "Alpha\\Sprint 0", "Alpha\\Sprint 1"
+    workdir = tmp_path / ".sprint-forecast"
+    build_cache(workdir, [
+        rev(1, 1, "2024-03-01T00:00:00.000Z", iteration=it1),
+        rev(2, 1, "2024-03-01T00:00:00.000Z", iteration=it1),
+    ], [
+        iteration(it0, "2024-02-19T05:00:00.000Z", "2024-03-04T04:59:59.999Z"),
+        iteration(it1, "2024-03-04T05:00:00.000Z", "2024-03-18T04:59:59.999Z"),
+    ], [team("Team Red", ["Alpha\\Red"], [it0, it1])], meta={"extracted_at:Alpha": "2024-03-11T00:00:00.000Z"})
+    shutil.copy(workspace / ".sprint-forecast" / "model.joblib", workdir / "model.joblib")
+    cli._predict(workdir, iteration=it1, team=None, as_of="now", top=0, title_lookup=None,
+                 now=pd.Timestamp("2024-03-25T00:00:00Z"))
+    out = capsys.readouterr().out
+    assert "scored as of last extract (2024-03-11 00:00 UTC)" in out and "sprint end" not in out
 
 
 def test_predict_and_export_with_an_old_model_ask_to_retrain(workspace, tmp_path):
