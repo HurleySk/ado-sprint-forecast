@@ -97,9 +97,10 @@ with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI re
 This repository contains code only. The cache, trained models and backtest output live in
 `.sprint-forecast/`, which is git-ignored along with `*.db`, `*.sqlite`, `*.jsonl`, `*.parquet`,
 `*.joblib` and `.env`. The model sees assignees only as numeric load features computed from opaque Analytics
-user keys; the cache also keeps each key's display name so `export` can name assignees in `items.csv`. Work item
-titles are fetched on demand for display and never stored. `export` writes to the folder you name: project, team
-and iteration names, work item IDs and numbers, and assignee names in `items.csv`; no titles.
+user keys; the cache also keeps each key's display name so `export` can name assignees in `items.csv` and
+`cycle.csv`. Work item titles are fetched on demand for display and never stored. `export` writes to the folder
+you name: project, team, iteration and state names, work item IDs and numbers, and assignee names in `items.csv`
+and `cycle.csv`; no titles.
 
 ## Development
 
