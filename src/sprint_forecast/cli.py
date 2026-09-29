@@ -16,6 +16,7 @@ from sprint_forecast import __version__
 from sprint_forecast.analytics import fetch_titles, make_fetch_json
 from sprint_forecast.backtest import SPRINT_MODELS, format_report, run_backtest
 from sprint_forecast.cache import CacheData, connect, load_cache
+from sprint_forecast.checkpoints import checkpoint_progress
 from sprint_forecast.config import (
     AUTH_METHODS,
     DEFAULT_DONE,
@@ -129,8 +130,8 @@ def _data(workdir: Path, s: Settings) -> None:
 def _backtest(workdir: Path, s: Settings, **kwargs) -> None:
     cache = _load_cache(workdir)
     sd = _build(cache, s)
-    frame = _checkpoint_frame(cache, sd, s)
-    result = run_backtest(sd, frame[frame["checkpoint"] == 0.0], **kwargs)
+    progress = checkpoint_progress(cache, sd, done_categories=s.done_categories)
+    result = run_backtest(sd, _checkpoint_frame(cache, sd, s), progress, **kwargs)
     click.echo(format_report(result))
     out = workdir / BACKTEST_FILE
     write_csv(result.sprint_rows, out)
@@ -368,8 +369,8 @@ def data(root: Path, done_categories: str | None) -> None:
 @done_option
 @click.pass_obj
 def backtest(root, project, team, model_choice, min_history, retrain_every, done_categories) -> None:
-    """Expanding-window backtest; writes .sprint-forecast/backtest.csv."""
-    models = {"a": ("a", "team_mean"), "c": ("c", "team_mean"), "all": SPRINT_MODELS}[model_choice]
+    """Expanding-window backtest at each checkpoint of a sprint; writes .sprint-forecast/backtest.csv."""
+    models = {"a": ("a", "progress", "team_mean"), "c": ("c", "team_mean"), "all": SPRINT_MODELS}[model_choice]
     _backtest(
         data_dir(root), _settings(root, done_categories), models=models, min_history=min_history,
         retrain_every=retrain_every, project=project, team=team,

@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from sprint_forecast.backtest import (
+    ITEM_ROW_COLUMNS,
     METRICS,
     LeakageError,
     calibration_table,
@@ -13,11 +14,7 @@ from sprint_forecast.backtest import (
     run_backtest,
     select_targets,
 )
-
-
-def day1(synth):
-    """Checkpoint rows at the cutoff: the frame the backtest scores until it learns checkpoints (Task 4)."""
-    return synth.ckpt[synth.ckpt["checkpoint"] == 0.0]
+from sprint_forecast.checkpoints import CHECKPOINTS
 
 
 def test_crps_matches_pairwise_definition():
@@ -58,7 +55,9 @@ def test_calibration_table_bins():
 
 @pytest.fixture(scope="module")
 def result(synth16):
-    return run_backtest(synth16.sprints, day1(synth16), min_history=8, retrain_every=4, n_draws=2000, seed=0)
+    return run_backtest(
+        synth16.sprints, synth16.ckpt, synth16.progress, min_history=8, retrain_every=4, n_draws=2000, seed=0,
+    )
 
 
 def test_backtest_has_no_leakage(result):
@@ -68,25 +67,68 @@ def test_backtest_has_no_leakage(result):
 
 
 def test_backtest_metrics_are_finite(result):
-    overall = result.summary[result.summary["team_key"] == "(all)"].set_index("model")
-    assert set(overall.index) == {"a", "c", "team_mean"}
+    overall = result.summary[result.summary["team_key"] == "(all)"]
+    assert set(zip(overall["model"], overall["checkpoint"])) == (
+        {("a", f) for f in CHECKPOINTS} | {("progress", f) for f in CHECKPOINTS[1:]}
+        | {("c", 0.0), ("team_mean", 0.0)}
+    )
     assert np.isfinite(overall[METRICS].to_numpy(dtype=float)).all()
     assert set(result.summary["team_key"]) == {"(all)", "Alpha/Team Red", "Alpha/Team Blue", "Beta/Team Green"}
-    assert np.isfinite(result.item_summary[["brier", "log_loss", "auc"]].to_numpy(dtype=float)).all()
-    assert result.calibration["n"].sum() == len(result.item_rows)
+    s = result.item_summary
+    assert set(s.loc[s["checkpoint"] == 0.0, "scope"]) == {"committed"}
+    assert set(s.loc[s["checkpoint"] > 0, "scope"]) == {"committed", "added"}
+    assert np.isfinite(s[["brier", "log_loss"]].to_numpy(dtype=float)).all()
+    assert np.isfinite(s.loc[s["scope"] == "committed", "auc"].to_numpy(dtype=float)).all()
+    assert result.calibration["n"].sum() == (result.item_rows["checkpoint"] == 0.0).sum()
+    assert result.calibration_pooled["n"].sum() == len(result.item_rows)
     assert len(result.loto) == 3 and np.isfinite(result.loto[["crps", "mae"]].to_numpy(dtype=float)).all()
     text = format_report(result)
-    assert "baseline C on CRPS" in text and "Leave-one-team-out" in text
+    assert "At the commit cutoff, model A" in text and "baseline C on CRPS" in text
+    assert "At 75% of the sprint, model A vs progress + day-1 odds: MAE" in text
+    assert "Leave-one-team-out" in text
+
+
+def test_model_a_beats_the_progress_reference_late_in_the_sprint(result):
+    overall = result.summary[result.summary["team_key"] == "(all)"].set_index(["model", "checkpoint"])
+    assert overall.loc[("a", 0.75), "mae"] < overall.loc[("progress", 0.75), "mae"]
+
+
+def test_later_checkpoints_start_from_the_points_done(synth16, result):
+    prog = synth16.progress.set_index(["sprint_id", "checkpoint"])
+    rows = result.sprint_rows[result.sprint_rows["checkpoint"] > 0]
+    assert set(rows["model"]) == {"a", "progress"}
+    floor = np.array([
+        prog.loc[(r.sprint_id, r.checkpoint), "done_points"] / r.committed_points for r in rows.itertuples()
+    ])
+    assert (rows["p10"].to_numpy() >= floor - 1e-12).all()
+
+
+def test_item_rows_carry_the_checkpoint_and_added_items(result):
+    items = result.item_rows
+    assert list(items.columns) == ITEM_ROW_COLUMNS
+    assert (items.loc[items["checkpoint"] == 0.0, "is_added"] == 0).all()
+    assert (items.loc[items["checkpoint"] > 0, "is_added"] == 1).any()
+    n_committed = result.sprint_rows.drop_duplicates("sprint_id").set_index("sprint_id")["n_items"]
+    at_cutoff = items[items["checkpoint"] == 0.0].groupby("sprint_id").size()
+    assert (at_cutoff == n_committed[at_cutoff.index]).all()
+
+
+def test_the_progress_reference_needs_model_a(synth16):
+    with pytest.raises(ValueError, match="needs model a"):
+        run_backtest(synth16.sprints, synth16.ckpt, synth16.progress, models=("progress",))
 
 
 def test_backtest_model_filter_and_team_filter(synth16):
-    res = run_backtest(synth16.sprints, day1(synth16), models=("c", "team_mean"), team="Team Green", n_draws=500)
+    res = run_backtest(
+        synth16.sprints, synth16.ckpt, synth16.progress, models=("c", "team_mean"), team="Team Green", n_draws=500,
+    )
     assert set(res.sprint_rows["model"]) == {"c", "team_mean"}
+    assert set(res.sprint_rows["checkpoint"]) == {0.0}
     assert set(res.sprint_rows["team"]) == {"Team Green"}
     assert res.item_rows.empty and res.loto.empty
 
 
 def test_backtest_with_no_targets(synth16):
-    res = run_backtest(synth16.sprints, day1(synth16), min_history=99, n_draws=100)
+    res = run_backtest(synth16.sprints, synth16.ckpt, synth16.progress, min_history=99, n_draws=100)
     assert res.sprint_rows.empty
     assert "No sprints qualified" in format_report(res)

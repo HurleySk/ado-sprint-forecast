@@ -25,7 +25,8 @@ def test_demo_runs_end_to_end(tmp_path):
     demo = tmp_path / ".sprint-forecast" / "demo"
     assert (demo / "cache.db").exists() and (demo / "model.joblib").exists()
     rows = pd.read_csv(demo / "backtest.csv")
-    assert set(rows["model"]) == {"a", "c", "team_mean"}
+    assert set(rows["model"]) == {"a", "progress", "c", "team_mean"}
+    assert set(rows["checkpoint"]) == {0.0, 0.25, 0.5, 0.75}
     for text in ("== data ==", "baseline C on CRPS", "Trained on", "P(full)", "riskiest items", "why:"):
         assert text in result.output
 
@@ -97,6 +98,7 @@ def test_backtest_writes_csv(workspace):
     assert result.exit_code == 0, result.output
     rows = pd.read_csv(workspace / ".sprint-forecast" / "backtest.csv")
     assert set(rows["model"]) == {"c", "team_mean"} and set(rows["team"]) == {"Team Red"}
+    assert set(rows["checkpoint"]) == {0.0}
 
 
 def test_predict_past_sprint_as_of_commit_with_titles(workspace, monkeypatch):
