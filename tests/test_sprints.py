@@ -11,6 +11,7 @@ from sprint_forecast.sprints import (
     SPRINT_COLUMNS,
     build_sprints,
     data_report,
+    iteration_group,
     match_team,
     scope_at,
     sprint_calendar,
@@ -348,3 +349,15 @@ def test_no_dated_iterations_builds_no_sprints(tmp_path):
     sd, cache = build(tmp_path, [rev(1, 1, PLAN, iteration="Alpha\Someday")], iterations=(UNDATED,))
     assert sd.report["n_sprints"] == 0 and sd.items.empty
     assert data_report(cache, sd)["projects"][0]["dated_iterations"] == 0
+
+
+def test_iteration_group_filters_to_a_team_and_explains_bad_input(tmp_path):
+    blue = team("Team Blue", ["Alpha\\Blue"], ["Alpha\\Sprint 1"])
+    cache = build_cache(tmp_path, [rev(1, 1, PRE)], [S1], [RED, blue])
+    cal = sprint_calendar(cache)
+    assert set(iteration_group(cal, "Alpha\\Sprint 1")["team"]) == {"Team Red", "Team Blue"}
+    assert iteration_group(cal, "Alpha\\Sprint 1", "Team Blue")["team"].tolist() == ["Team Blue"]
+    with pytest.raises(ValueError, match="no team runs"):
+        iteration_group(cal, "Alpha\\Nope")
+    with pytest.raises(ValueError, match="does not run"):
+        iteration_group(cal, "Alpha\\Sprint 1", "Team Pink")

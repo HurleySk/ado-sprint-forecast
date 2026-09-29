@@ -83,7 +83,18 @@ def sprint_calendar(cache: CacheData, commit_grace_days: float = 1.0) -> pd.Data
     return cal[CALENDAR_COLUMNS + ["is_fallback"]].reset_index(drop=True)
 
 
-class _Assigner:
+def iteration_group(cal: pd.DataFrame, iteration: str, team: str | None = None) -> pd.DataFrame:
+    """The calendar rows (one per team) of `iteration`, only `team`'s when given. Raises ValueError for an iteration
+    no team runs, or a team that does not run it."""
+    group = cal[cal["iteration"] == iteration]
+    if group.empty:
+        raise ValueError(f"no team runs a dated iteration with path {iteration!r}")
+    if team is not None and team not in set(group["team"]):
+        raise ValueError(f"team {team!r} does not run {iteration!r}; teams: {', '.join(group['team'])}")
+    return group if team is None else group[group["team"] == team]
+
+
+class Assigner:
     """Assign (area, iteration, project) rows to one of the teams running that iteration."""
 
     def __init__(self, cache: CacheData, cal: pd.DataFrame):
@@ -102,25 +113,25 @@ class _Assigner:
         return pd.Series(teams, index=areas.index, dtype=object)
 
 
-def _iteration_end_map(cache: CacheData) -> pd.Series:
+def iteration_end_map(cache: CacheData) -> pd.Series:
     its = cache.iterations.dropna(subset=["end_date"]).drop_duplicates("path")
     return its.set_index("path")["end_date"]
 
 
-def _horizon(cache: CacheData, projects: pd.Series) -> pd.Series:
+def horizon(cache: CacheData, projects: pd.Series) -> pd.Series:
     """When each row's project was extracted; now for projects with no recorded extraction."""
     now = pd.Timestamp.now(tz="UTC")
     return pd.Series([cache.extracted_at.get(p, now) for p in projects], index=projects.index, dtype="datetime64[ns, UTC]")
 
 
-def _pairs(revisions: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
+def pairs_for(revisions: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
     """(item_id, target) for every item ever in a window's iteration, joined to the window's dates."""
     seen = revisions.loc[revisions["iteration"].isin(windows["target"]), ["item_id", "iteration"]]
     seen = seen.drop_duplicates().rename(columns={"iteration": "target"})
     return seen.merge(windows, on="target").reset_index(drop=True)
 
 
-def _carryover(revisions: pd.DataFrame, rows: pd.DataFrame, iteration_end: pd.Series) -> np.ndarray:
+def carryover(revisions: pd.DataFrame, rows: pd.DataFrame, iteration_end: pd.Series) -> np.ndarray:
     """Distinct earlier iterations each row's item was in (revisions <= cutoff) whose iteration ended before start."""
     left = rows[["item_id", "cutoff", "start"]].reset_index(drop=True)
     left["_row"] = np.arange(len(left))
@@ -137,7 +148,7 @@ def _committed(
     cache: CacheData,
     pairs: pd.DataFrame,
     at_c: pd.DataFrame,
-    assign: _Assigner,
+    assign: Assigner,
     types: set[str],
     excluded: set[str],
 ) -> tuple[pd.DataFrame, int]:
@@ -163,7 +174,7 @@ def _committed(
     c = c[c["team"].notna()].rename(columns={"target": "iteration"})
     c["team_key"] = c["project"] + "/" + c["team"]
     c["sprint_id"] = c["team_key"] + "|" + c["iteration"]
-    c["carryover_count"] = _carryover(cache.revisions, c, _iteration_end_map(cache))
+    c["carryover_count"] = carryover(cache.revisions, c, iteration_end_map(cache))
     return c, n_unassigned
 
 
@@ -221,14 +232,14 @@ def build_sprints(
     revs = cache.revisions
     cal = sprint_calendar(cache, commit_grace_days)
     types, done = set(work_item_types), set(done_categories)
-    assign = _Assigner(cache, cal)
+    assign = Assigner(cache, cal)
     windows = cal.drop_duplicates("iteration")[["project", "iteration", "start", "end", "cutoff"]]
-    pairs = _pairs(revs, windows.rename(columns={"iteration": "target"}))
+    pairs = pairs_for(revs, windows.rename(columns={"iteration": "target"}))
     at_c = as_of_many(revs, pairs[["item_id", "cutoff"]], "cutoff")
     at_e = as_of_many(revs, pairs[["item_id", "end"]], "end")
     c, n_unassigned = _committed(cache, pairs, at_c, assign, types, done | {REMOVED})
     e = at_e.loc[c.index]
-    is_open = (c["end"] > _horizon(cache, c["project"])).to_numpy()  # outcome not observed yet
+    is_open = (c["end"] > horizon(cache, c["project"])).to_numpy()  # outcome not observed yet
     ended_done = (e["iteration"].to_numpy() == c["iteration"].to_numpy()) & e["state_category"].isin(done).to_numpy()
     c["done"] = np.where(is_open, np.nan, ended_done.astype("float64"))
     c["state_category_at_end"] = np.where(is_open, None, e["state_category"].to_numpy())
@@ -262,7 +273,7 @@ def build_sprints(
 
 
 def _added(
-    cache: CacheData, pairs: pd.DataFrame, at_e: pd.DataFrame, assign: _Assigner, done: set[str],
+    cache: CacheData, pairs: pd.DataFrame, at_e: pd.DataFrame, assign: Assigner, done: set[str],
     history_items: pd.DataFrame,
 ) -> pd.DataFrame:
     """Items added after the cutoff and still in the sprint at its end, described as of the end."""
@@ -281,8 +292,8 @@ def _added(
         return pd.DataFrame(columns=ADDED_COLUMNS)
     a["team_key"] = a["project"] + "/" + a["team"]
     a["sprint_id"] = a["team_key"] + "|" + a["iteration"]
-    a["carryover_count"] = _carryover(cache.revisions, a.assign(cutoff=a["end"]), _iteration_end_map(cache))
-    is_open = (a["end"] > _horizon(cache, a["project"])).to_numpy()
+    a["carryover_count"] = carryover(cache.revisions, a.assign(cutoff=a["end"]), iteration_end_map(cache))
+    is_open = (a["end"] > horizon(cache, a["project"])).to_numpy()
     a["done"] = np.where(is_open, np.nan, pd.Series(state).isin(done).to_numpy().astype("float64"))
     a["state_category_at_end"] = np.where(is_open, None, state)
     a = impute_points(a, history_items if len(history_items) else a)
@@ -302,16 +313,12 @@ def scope_at(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Committed-style scope of one iteration as of `cutoff`, outcome unknown. Returns (sprints, items)."""
     cal = sprint_calendar(cache, commit_grace_days)
-    group = cal[cal["iteration"] == iteration]
-    if group.empty:
-        raise ValueError(f"no team runs a dated iteration with path {iteration!r}")
-    if team is not None and team not in set(group["team"]):
-        raise ValueError(f"team {team!r} does not run {iteration!r}; teams: {', '.join(group['team'])}")
+    group = iteration_group(cal, iteration, team)
     windows = group.iloc[:1][["project", "iteration", "start", "end"]].rename(columns={"iteration": "target"})
     windows = windows.assign(cutoff=to_utc(cutoff))
-    pairs = _pairs(cache.revisions, windows)
+    pairs = pairs_for(cache.revisions, windows)
     at_c = as_of_many(cache.revisions, pairs[["item_id", "cutoff"]], "cutoff")
-    c, _ = _committed(cache, pairs, at_c, _Assigner(cache, cal), set(work_item_types), set(done_categories) | {REMOVED})
+    c, _ = _committed(cache, pairs, at_c, Assigner(cache, cal), set(work_item_types), set(done_categories) | {REMOVED})
     if team is not None:
         c = c[c["team"] == team]
     if c.empty:
