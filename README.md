@@ -47,10 +47,19 @@ put for the rest of the sprint) and each team's next sprint (scored on the scope
 | `item_forecasts/<run_id>.csv` | run x committed item | work item ID, points, probability of done, top 3 risk factors, state now, done so far |
 | `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends) |
 | `items.csv` | reconstructed sprint x item in it | points, sprints already carried over, added after the commit cutoff or not, assignee at the sprint's end (display name), done (empty until the sprint ends) |
+| `cycle.csv` | finished item | team, type, points when work started and when done, re-estimated or not, started, done, business days between |
+| `cycle_states.csv` | finished item x state | business days the item spent in that state between starting and done |
 | `backtest.csv` | backtested sprint and model | predicted band vs actual, copied from the last `backtest` run |
 
 Forecast files are added per run and never rewritten, so the history (progress against the day-1 forecast)
-builds up; `sprints.csv`, `items.csv` and `backtest.csv` are replaced. Files are written to a temp name and renamed, so a
+builds up; `sprints.csv`, `items.csv`, `cycle.csv`, `cycle_states.csv` and `backtest.csv` are replaced.
+
+`cycle.csv` answers how long work took, for checking estimates against it. An item's cycle runs from its first
+active state (InProgress, or Resolved when that isn't done) to the first time it reached a done category;
+reopening later is ignored, and an item that went straight to done has no cycle. Business days skip Saturdays
+and Sundays and keep fractions (UTC). Its team is the one running the iteration it finished in that owns its
+area, else any team in the project that owns the area. `cycle_states.csv` splits that time by state name, so a
+report can group states into phases (development, waiting for test, test, approval) for its own process. Files are written to a temp name and renamed, so a
 sync client or a refresh never reads half a file. Timestamps are UTC (`2024-06-10T05:00:00Z`).
 
 The files carry no titles; join `item_id` to Azure DevOps (e.g. the Analytics OData `WorkItems` feed) for them.

@@ -3,7 +3,9 @@ import pytest
 
 from conftest import SYNTH_TYPES
 from helpers import build_cache, rev
+from sprint_forecast.cycle import CYCLE_STATE_COLUMNS
 from sprint_forecast.export import (
+    CYCLE_FILE_COLUMNS,
     ITEM_FORECAST_COLUMNS,
     ITEM_HISTORY_COLUMNS,
     SPRINT_FORECAST_COLUMNS,
@@ -173,6 +175,21 @@ def test_export_writes_every_committed_and_added_item_with_whoever_held_it_at_th
     assert items.loc[~items["sprint_id"].isin(closed), "done"].isna().all()
 
 
+def test_export_writes_cycle_time_per_finished_item_and_state(exported, synth16):
+    out, _, _ = exported
+    cycle = pd.read_csv(out / "cycle.csv")
+    states = pd.read_csv(out / "cycle_states.csv")
+    assert list(cycle.columns) == CYCLE_FILE_COLUMNS and list(states.columns) == CYCLE_STATE_COLUMNS
+    assert len(cycle) > 100 and cycle["item_id"].is_unique
+    timed = cycle[cycle["days"].notna()].set_index("item_id")
+    per_item = states.groupby("item_id")["days"].sum()
+    assert per_item.reindex(timed.index).to_numpy() == pytest.approx(timed["days"].to_numpy())
+    assert set(states["state"]) <= {"Active", "Resolved"}
+    names = set(synth16.cache.users["name"])
+    assert cycle["assignee"].dropna().isin(names).all()
+    assert cycle["team"].notna().mean() > 0.8  # synth also files some items at the project root, which no team owns
+
+
 def test_export_with_nothing_running_still_writes_headers(synth16, bundle, tmp_path):
     result = export_forecasts(synth16.cache, bundle, tmp_path, now=pd.Timestamp("2030-01-01T00:00:00Z"))
     assert result.sprints.empty
@@ -180,3 +197,4 @@ def test_export_with_nothing_running_still_writes_headers(synth16, bundle, tmp_p
     assert list(pd.read_csv(tmp_path / "item_forecasts" / f"{result.run_id}.csv").columns) == ITEM_FORECAST_COLUMNS
     assert not (tmp_path / "backtest.csv").exists()
     assert list(pd.read_csv(tmp_path / "items.csv").columns) == ITEM_HISTORY_COLUMNS
+    assert list(pd.read_csv(tmp_path / "cycle.csv").columns) == CYCLE_FILE_COLUMNS

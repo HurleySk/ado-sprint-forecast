@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from sprint_forecast.cache import CacheData
+from sprint_forecast.cycle import CYCLE_STATE_COLUMNS, build_cycle
 from sprint_forecast.forecast import ScoredSprint, score_iteration
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.sprints import SPRINT_COLUMNS, build_sprints, sprint_calendar
@@ -40,6 +41,12 @@ ITEM_FORECAST_COLUMNS = [
 ITEM_HISTORY_COLUMNS = [
     "sprint_id", "item_id", "type", "points", "is_unestimated", "carryover_count", "added_mid", "assignee", "done",
     "state_category_at_end",
+]
+CYCLE_FILE = "cycle.csv"
+CYCLE_STATES_FILE = "cycle_states.csv"
+CYCLE_FILE_COLUMNS = [
+    "item_id", "project", "team", "team_key", "type", "iteration", "assignee",
+    "points_at_start", "points", "re_estimated", "started", "closed", "days",
 ]
 UNKNOWN_USER = "Unknown user"
 
@@ -128,6 +135,17 @@ def item_history(history, users: pd.DataFrame) -> pd.DataFrame:
     return out[ITEM_HISTORY_COLUMNS].reset_index(drop=True)
 
 
+def cycle_files(cache: CacheData, users: pd.DataFrame, settings: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Every finished item's cycle time (first active state to done) and its business days in each state."""
+    cy = build_cycle(cache, work_item_types=settings["work_item_types"], done_categories=settings["done_categories"])
+    items = cy.items.assign(
+        item_id=cy.items["item_id"].astype("int64"),
+        assignee=assignee_names(cy.items["assigned_to_sk"], users),
+        re_estimated=cy.items["re_estimated"].astype(bool),
+    )
+    return items[CYCLE_FILE_COLUMNS], cy.states[CYCLE_STATE_COLUMNS]
+
+
 def _item_rows(fc, scored: ScoredSprint, progress: pd.DataFrame, run_id: str, key: str) -> pd.DataFrame:
     rows = scored.items
     contrib = contributions(fc.item_model, rows)
@@ -175,7 +193,8 @@ def export_forecasts(
 ) -> ExportResult:
     """Forecast every running team sprint (scored at its commit cutoff) and each team's next sprint (scored on
     its scope now). Appends sprint_forecasts/<run_id>.csv and item_forecasts/<run_id>.csv; replaces sprints.csv
-    (every reconstructed sprint and its outcome), items.csv (every committed or added item, who held it at the end and its outcome) and,
+    (every reconstructed sprint and its outcome), items.csv (every committed or added item, who held it at the end
+    and its outcome), cycle.csv and cycle_states.csv (every finished item's cycle time and its time per state) and,
     when `backtest_csv` exists, backtest.csv."""
     out = Path(out)
     now = pd.Timestamp.now(tz="UTC").floor("s") if now is None else to_utc(now)
@@ -210,6 +229,8 @@ def export_forecasts(
         write_csv(history.sprints[SPRINT_COLUMNS], out / SPRINTS_FILE),
         write_csv(item_history(history, cache.users), out / ITEM_HISTORY_FILE),
     ]
+    cycle, cycle_states = cycle_files(cache, cache.users, settings)
+    files += [write_csv(cycle, out / CYCLE_FILE), write_csv(cycle_states, out / CYCLE_STATES_FILE)]
     if backtest_csv is not None and Path(backtest_csv).exists():
         files.append(_copy(Path(backtest_csv), out / BACKTEST_FILE))
     return ExportResult(run_id, out, sprints, files)
