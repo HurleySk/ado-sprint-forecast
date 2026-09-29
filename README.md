@@ -1,11 +1,13 @@
 # sprint-forecast
 
-Forecast how much of an Azure DevOps sprint's **day-1 committed scope** a team will deliver.
+Forecast how much of an Azure DevOps sprint's **day-1 committed scope** a team will deliver, from its first day
+to its last.
 
 The output is a distribution over "% of committed points reaching Done": P(full scope), P(>=80%),
-the expected %, and a p10/p50/p90 band. It is meant as a planning-time sanity check ("is this sprint
-overloaded?") and as an honest ML exercise: every model is backtested against a dumb velocity baseline,
-and losing to the baseline is reported as a result.
+the expected %, and a p10/p50/p90 band. Before a sprint it is a planning-time sanity check ("is this sprint
+overloaded?"). While it runs, the forecast starts from the points already done and scores every open item,
+including items added after day 1, on where it stands now. It is also an honest ML exercise: every model is
+backtested against a dumb velocity baseline, and losing to the baseline is reported as a result.
 
 ## Quick start (no Azure DevOps needed)
 
@@ -33,26 +35,36 @@ sprint-forecast export --out <folder>   # CSVs for Power BI (see below)
 ```
 
 `--done-categories Resolved,Completed` (on `data`, `backtest` and `train`) widens what counts as done
-when your process closes work in a Resolved state. `predict --as-of now` scores the iteration's current
-contents; by default it uses the contents at the commit cutoff once that has passed.
+when your process closes work in a Resolved state. `predict` scores the sprint as it stands now: the points
+done so far, the forecast for the committed points still open, the day-1 forecast beside it, and the riskiest
+open items, with items added after day 1 marked `added`. Once the sprint is over it reports the outcome.
+`predict --as-of commit` shows the day-1 view at the commit cutoff. After upgrading from 0.1, run `train`
+again: older model files are refused with a message saying so.
 
 ## Power BI
 
-`sprint-forecast export` forecasts every running team sprint (scored at its commit cutoff, so the number stays
-put for the rest of the sprint) and each team's next sprint (scored on the scope loaded so far), then writes:
+`sprint-forecast export` forecasts every running team sprint as it stands at the run (the points done so far
+plus the forecast for the committed items still open, with the forecast made at the commit cutoff in the
+`day1_*` columns) and each team's next sprint (scored on the scope loaded so far), then writes:
 
 | File | One row per | Contents |
 |---|---|---|
-| `sprint_forecasts/<run_id>.csv` | run x team sprint | status, committed items and points, load vs velocity, P(full), P(>=80%), expected, p10/p50/p90, share done so far |
-| `item_forecasts/<run_id>.csv` | run x committed item | work item ID, points, probability of done, top 3 risk factors, state now, done so far |
+| `sprint_forecasts/<run_id>.csv` | run x team sprint | status, committed items and points, load vs velocity, P(full), P(>=80%), expected, p10/p50/p90 as of the run, share done so far, and the day-1 expected, p10 and p90 |
+| `item_forecasts/<run_id>.csv` | run x item open in the sprint or committed to it | work item ID, points, probability of done (1 or 0 for committed items already done or out of the sprint), top 3 risk factors for open items, state now, done so far, added after day 1 or not |
 | `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends) |
 | `items.csv` | reconstructed sprint x item in it | points, sprints already carried over, added after the commit cutoff or not, assignee at the sprint's end (display name), done (empty until the sprint ends) |
 | `cycle.csv` | finished item | team, type, points when work started and when done, re-estimated or not, started, done, business days between |
 | `cycle_states.csv` | finished item x state | business days the item spent in that state between starting and done |
-| `backtest.csv` | backtested sprint and model | predicted band vs actual, copied from the last `backtest` run |
+| `backtest.csv` | backtested sprint, checkpoint and model | predicted band vs actual at that point of the sprint, copied from the last `backtest` run |
 
-Forecast files are added per run and never rewritten, so the history (progress against the day-1 forecast)
-builds up; `sprints.csv`, `items.csv`, `cycle.csv`, `cycle_states.csv` and `backtest.csv` are replaced.
+Forecast files are added per run and never rewritten, so the history (how the forecast moved through the sprint,
+next to the day-1 forecast) builds up; `sprints.csv`, `items.csv`, `cycle.csv`, `cycle_states.csv` and
+`backtest.csv` are replaced.
+
+Changed in 0.2.0: a running sprint used to be scored at its commit cutoff, and `item_forecasts` listed committed
+items only. A report that rebuilt a projected finish from `points_done_so_far` plus the open items' `p_done`
+should read `expected` instead, or keep the rebuild and filter `is_added = False`. A report on `backtest.csv`
+that wants the day-1 view filters `checkpoint = 0`.
 
 `cycle.csv` answers how long work took, for checking estimates against it. An item's cycle runs from its first
 active state (InProgress, or Resolved when that isn't done) to the first time it reached a done category;
@@ -83,14 +95,24 @@ with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI re
   reported as unassigned. Committed scope is what sits in the iteration at start + 1 day (the commit
   cutoff); an item is done if at the end date it is still in the iteration and in a done category.
   Sprints that had not ended when the data was extracted have no outcome yet and are never trained on.
-- **Features** are computed as of the cutoff and use only sprints that ended before the sprint started.
+- **Features** describe an item open in the sprint at a time t: its type, size, state, days in that state,
+  state changes this sprint, age, edits and carry-overs, whether it was added after day 1 or reassigned since,
+  the sprint's day-1 plan (load vs velocity, bug, carry-over and unestimated shares, the team's recent
+  completion, the assignee's load) and its progress at t (share of the sprint passed, days left, share of
+  committed points done). Training uses t at the commit cutoff and at 25%, 50% and 75% of the way to the end;
+  scoring uses any t. Everything reads revisions up to t and sprints that ended before the sprint started.
   Team identity is never a feature.
-- **Models**: C, a velocity bootstrap baseline; a team-mean reference; A, a LightGBM item classifier with
-  time-split calibration (plus a logistic-regression sanity check). Item probabilities roll up to a sprint
-  distribution through a Monte Carlo with a shared per-sprint shock whose size is fitted by maximum
-  likelihood; the shock widens the spread without moving any item's calibrated probability.
-- **Backtest**: expanding window, retrained every few sprints, with a leakage check, CRPS, pinball loss,
-  Brier scores, coverage and MAE per model and team, plus a leave-one-team-out generalization check.
+- **Models**: C, a velocity bootstrap baseline; a team-mean reference; A, a LightGBM item classifier trained
+  on those checkpoint rows, with time-split calibration (plus a logistic-regression sanity check). At t, the
+  sprint's distribution is the committed points done by t plus a Monte Carlo over the committed items still
+  open, with a shared per-sprint shock whose size is fitted by maximum likelihood; the shock widens the spread
+  without moving any item's calibrated probability. Items added after day 1 are scored but stay outside the
+  committed scope the target measures.
+- **Backtest**: expanding window, retrained every few sprints, with a leakage check. Each sprint is scored at
+  the commit cutoff and at 25%, 50% and 75% of the way to the end: CRPS, pinball loss, Brier scores, coverage
+  and MAE per model, checkpoint and team. Model A meets baseline C at the cutoff and, later on, a progress
+  reference (points done so far plus the day-1 odds of the committed items still open). Item metrics are split
+  by checkpoint and into committed and added items, and a leave-one-team-out check covers generalization.
 
 ## Privacy
 

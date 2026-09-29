@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sprint-forecast"
-version = "0.1.0"
+version = "0.2.0"
 description = "Forecast how much of an Azure DevOps sprint's day-1 committed scope will be delivered"
 readme = "README.md"
 requires-python = ">=3.11"
