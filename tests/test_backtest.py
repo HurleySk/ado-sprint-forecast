@@ -15,6 +15,11 @@ from sprint_forecast.backtest import (
 )
 
 
+def day1(synth):
+    """Checkpoint rows at the cutoff: the frame the backtest scores until it learns checkpoints (Task 4)."""
+    return synth.ckpt[synth.ckpt["checkpoint"] == 0.0]
+
+
 def test_crps_matches_pairwise_definition():
     rng = np.random.default_rng(0)
     x = rng.random(200)
@@ -53,7 +58,7 @@ def test_calibration_table_bins():
 
 @pytest.fixture(scope="module")
 def result(synth16):
-    return run_backtest(synth16.sprints, synth16.frame, min_history=8, retrain_every=4, n_draws=2000, seed=0)
+    return run_backtest(synth16.sprints, day1(synth16), min_history=8, retrain_every=4, n_draws=2000, seed=0)
 
 
 def test_backtest_has_no_leakage(result):
@@ -75,13 +80,13 @@ def test_backtest_metrics_are_finite(result):
 
 
 def test_backtest_model_filter_and_team_filter(synth16):
-    res = run_backtest(synth16.sprints, synth16.frame, models=("c", "team_mean"), team="Team Green", n_draws=500)
+    res = run_backtest(synth16.sprints, day1(synth16), models=("c", "team_mean"), team="Team Green", n_draws=500)
     assert set(res.sprint_rows["model"]) == {"c", "team_mean"}
     assert set(res.sprint_rows["team"]) == {"Team Green"}
     assert res.item_rows.empty and res.loto.empty
 
 
 def test_backtest_with_no_targets(synth16):
-    res = run_backtest(synth16.sprints, synth16.frame, min_history=99, n_draws=100)
+    res = run_backtest(synth16.sprints, day1(synth16), min_history=99, n_draws=100)
     assert res.sprint_rows.empty
     assert "No sprints qualified" in format_report(res)

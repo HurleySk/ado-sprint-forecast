@@ -4,8 +4,9 @@ import pytest
 from sklearn.metrics import roc_auc_score
 
 from sprint_forecast import model as model_module
-from sprint_forecast.features import DAY1_FEATURES as FEATURES
+from sprint_forecast.features import FEATURES
 from sprint_forecast.model import (
+    ISOTONIC_MIN_ITEMS,
     P_CLIP,
     contributions,
     describe_drivers,
@@ -24,7 +25,7 @@ def _time_split(frame):
 
 @pytest.fixture(scope="module")
 def trained(synth40):
-    train, test = _time_split(synth40.frame)
+    train, test = _time_split(synth40.ckpt)
     return train_item_model(train, seed=0), train, test
 
 
@@ -43,20 +44,23 @@ def test_carryover_shap_is_negative_for_carried_items(trained):
     assert contrib.loc[carried, "carryover_count"].mean() < contrib.loc[~carried, "carryover_count"].mean()
 
 
-def test_calibration_uses_last_sprints_and_platt_when_small(trained):
+def test_calibration_uses_last_sprints_and_groups_by_checkpoint(trained):
     model, train, _ = trained
-    assert model.calibration == "platt"
+    assert model.calibration == ("isotonic" if len(model.calib_frame) >= ISOTONIC_MIN_ITEMS else "platt")
     fit_ids, cal_ids = split_by_time(train)
     assert len(cal_ids) == round(0.2 * (len(fit_ids) + len(cal_ids)))
     starts = train.drop_duplicates("sprint_id").set_index("sprint_id")["start"]
     assert starts[cal_ids].min() >= starts[fit_ids].max()
-    assert set(model.calib_frame["sprint_id"]) == set(cal_ids)
-    assert model.calib_frame["p"].between(P_CLIP, 1 - P_CLIP).all()
+    cf = model.calib_frame
+    assert list(cf.columns) == ["sprint_id", "group", "p", "y"]
+    assert set(cf["sprint_id"]) == set(cal_ids) and cf["group"].nunique() > len(cal_ids)
+    assert (cf["group"].str.split("@").str[0] == cf["sprint_id"]).all()
+    assert cf["p"].between(P_CLIP, 1 - P_CLIP).all()
 
 
 def test_isotonic_when_calibration_set_is_large(synth40, monkeypatch):
     monkeypatch.setattr(model_module, "ISOTONIC_MIN_ITEMS", 50)
-    train, test = _time_split(synth40.frame)
+    train, test = _time_split(synth40.ckpt)
     model = train_item_model(train, seed=0)
     assert model.calibration == "isotonic"
     p = predict_proba(model, test)
@@ -64,21 +68,21 @@ def test_isotonic_when_calibration_set_is_large(synth40, monkeypatch):
 
 
 def test_training_is_deterministic(synth40):
-    train, test = _time_split(synth40.frame)
+    train, test = _time_split(synth40.ckpt)
     a = predict_proba(train_item_model(train, seed=0), test)
     b = predict_proba(train_item_model(train, seed=0), test)
     assert np.array_equal(a, b)
 
 
 def test_single_class_training_raises(synth40):
-    frame = synth40.frame.assign(y=1.0)
+    frame = synth40.ckpt.assign(y=1.0)
     with pytest.raises(ValueError, match="both"):
         train_item_model(frame)
 
 
 def test_unknown_category_and_empty_frame_predict(trained):
     model, _, test = trained
-    odd = test.head(3).assign(type="Requirement", state_category_at_commit="Resolved")
+    odd = test.head(3).assign(type="Requirement", state_category="Resolved")
     p = predict_proba(model, odd)
     assert p.shape == (3,) and np.isfinite(p).all()
     assert predict_proba_lr(model, odd).shape == (3,)
@@ -119,7 +123,14 @@ def test_describe_drivers_in_plain_words():
     ("has_parent", 0.0, "item has no parent"),
     ("is_unassigned", 1.0, "item is unassigned"),
     ("type", "Bug", "item is a Bug"),
-    ("state_category_at_commit", "Proposed", "state at commit was Proposed"),
+    ("state_category", "InProgress", "state is InProgress"),
+    ("elapsed", 0.6, "60% of the sprint has passed"),
+    ("days_left", 3.2, "3 days left"),
+    ("done_share", 0.42, "42% of committed points done"),
+    ("days_in_state", 6.0, "in the same state for 6 days"),
+    ("n_state_changes", 1.0, "1 state change this sprint"),
+    ("is_added", 1.0, "added after day 1"),
+    ("reassigned", 1.0, "reassigned since day 1"),
 ])
 def test_describe_drivers_reads_as_a_sentence(feature, value, text):
     contrib = pd.Series({f: 0.0 for f in FEATURES} | {feature: -1.0})
@@ -139,13 +150,16 @@ def test_describe_drivers_says_why_a_value_is_missing():
     unassigned = values.copy()
     unassigned["is_unassigned"] = 1.0
     assert describe_drivers(contrib, unassigned, k=1) == ["item is unassigned"]
+    added = values.copy()
+    added["is_added"] = 1.0
+    assert describe_drivers(contrib, added, k=1) == ["added after day 1"]
 
 
 def test_missing_categories_train_and_predict(synth40):
-    frame = synth40.frame.copy()
-    frame.loc[frame.index[::7], "state_category_at_commit"] = np.nan
+    frame = synth40.ckpt.copy()
+    frame.loc[frame.index[::7], "state_category"] = np.nan
     frame.loc[frame.index[::11], "type"] = np.nan
     model = train_item_model(frame, seed=0)
-    assert "(missing)" in model.categories["state_category_at_commit"]
+    assert "(missing)" in model.categories["state_category"]
     p = predict_proba(model, frame.head(50))
     assert np.isfinite(p).all() and np.isfinite(predict_proba_lr(model, frame.head(50))).all()

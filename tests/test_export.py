@@ -15,6 +15,7 @@ from sprint_forecast.export import (
     select_sprints,
     write_csv,
 )
+from sprint_forecast.features import FEATURE_VERSION
 from sprint_forecast.rollup import fit_forecaster
 from sprint_forecast.sprints import SPRINT_COLUMNS
 
@@ -82,7 +83,8 @@ def test_write_csv_uses_utc_iso_timestamps_and_leaves_no_temp_file(tmp_path):
 @pytest.fixture(scope="module")
 def bundle(synth16):
     return {
-        "forecaster": fit_forecaster(synth16.frame, seed=0),
+        "forecaster": fit_forecaster(synth16.ckpt, seed=0),
+        "feature_version": FEATURE_VERSION,
         "work_item_types": SYNTH_TYPES,
         "done_categories": ["Completed"],
         "commit_grace_days": 1.0,

@@ -79,19 +79,24 @@ def fit_sigma(p: np.ndarray, y: np.ndarray, groups: np.ndarray) -> float:
 
 
 def simulate_pct_done(
-    p: np.ndarray, points: np.ndarray, sigma: float, n_draws: int = N_DRAWS, seed: int = 0,
+    p: np.ndarray, points: np.ndarray, sigma: float, n_draws: int = N_DRAWS, seed: int = 0, *,
+    done_points: float = 0.0, total_points: float | None = None,
 ) -> np.ndarray:
-    """Samples of sum(points * done) / sum(points), with one shared shock z ~ N(0, sigma^2) per draw;
-    each item's mean done rate stays p (see shifted_logit)."""
+    """Samples of (done_points + sum(points * done)) / total_points, with one shared shock z ~ N(0, sigma^2) per
+    draw; each item's mean done rate stays p (see shifted_logit). total_points defaults to sum(points). NaN when
+    the total is not positive; the constant done_points / total_points when there are no items."""
     p = np.asarray(p, dtype=float)
     w = np.asarray(points, dtype=float)
-    if len(p) == 0 or w.sum() <= 0:
+    total = float(w.sum()) if total_points is None else float(total_points)
+    if not total > 0:
         return np.full(n_draws, np.nan)
+    if len(p) == 0:
+        return np.full(n_draws, done_points / total)
     rng = np.random.default_rng(seed)
     z = rng.normal(0.0, sigma, size=(n_draws, 1)) if sigma > 0 else np.zeros((n_draws, 1))
     prob = expit(shifted_logit(p, sigma)[None, :] + z)
     done = rng.random((n_draws, len(p))) < prob
-    return done @ w / w.sum()
+    return (done_points + done @ w) / total
 
 
 def summarize(samples: np.ndarray) -> dict[str, float]:
@@ -117,13 +122,21 @@ def fit_forecaster(frame: pd.DataFrame, seed: int = 0) -> Forecaster:
     """Train model A and fit sigma on its calibrated predictions for the calibration sprints."""
     model = train_item_model(frame, seed=seed)
     cf = model.calib_frame
-    sigma = fit_sigma(cf["p"].to_numpy(), cf["y"].to_numpy(), cf["sprint_id"].to_numpy()) if len(cf) else 0.0
+    sigma = fit_sigma(cf["p"].to_numpy(), cf["y"].to_numpy(), cf["group"].to_numpy()) if len(cf) else 0.0
     return Forecaster(model, sigma)
 
 
 def forecast_sprint(
-    fc: Forecaster, items: pd.DataFrame, n_draws: int = N_DRAWS, seed: int = 0,
+    fc: Forecaster, items: pd.DataFrame, n_draws: int = N_DRAWS, seed: int = 0, *,
+    done_points: float = 0.0, total_points: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Item probabilities and %done samples for one sprint's feature rows."""
+    """Item probabilities for every row of one sprint's checkpoint features, and samples of the share of its
+    committed points done by the end: rows still committed (is_added == 0) are simulated with their commit-time
+    points on top of `done_points`, out of `total_points` (default: those rows' points)."""
     p = predict_proba(fc.item_model, items)
-    return p, simulate_pct_done(p, items["points"].to_numpy(float), fc.sigma, n_draws, seed)
+    committed = (items["is_added"] == 0).to_numpy()
+    w = items["points_at_commit"].to_numpy(dtype=float)[committed]
+    samples = simulate_pct_done(
+        p[committed], w, fc.sigma, n_draws, seed, done_points=done_points, total_points=total_points,
+    )
+    return p, samples

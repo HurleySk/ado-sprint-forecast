@@ -69,17 +69,19 @@ def test_fit_sigma_degenerate_inputs():
 
 
 def test_forecaster_on_synth(synth40):
-    frame = synth40.frame
+    frame = synth40.ckpt
+    prog = synth40.progress.set_index(["sprint_id", "checkpoint"])
     last = frame["start"].max()
     fc = fit_forecaster(frame[frame["end"] < last], seed=0)
     assert 0.0 <= fc.sigma <= 3.0
-    target = frame[frame["start"] == last]
-    sid = target["sprint_id"].iloc[0]
-    p, samples = forecast_sprint(fc, target[target["sprint_id"] == sid], n_draws=2000, seed=0)
+    target = frame[(frame["start"] == last) & (frame["checkpoint"] == 0.5)]
+    rows = target[target["sprint_id"] == target["sprint_id"].iloc[0]]
+    done, total = prog.loc[(rows["sprint_id"].iloc[0], 0.5), ["done_points", "committed_points"]]
+    p, samples = forecast_sprint(fc, rows, n_draws=2000, seed=0, done_points=done, total_points=total)
     s = summarize(samples)
-    assert 0.0 <= s["p10"] <= s["p50"] <= s["p90"] <= 1.0
+    assert done / total <= s["p10"] <= s["p50"] <= s["p90"] <= 1.0
     assert 0.0 <= s["p_full"] <= s["p_80"] <= 1.0
-    assert len(p) == (target["sprint_id"] == sid).sum()
+    assert len(p) == len(rows)
 
 
 def test_shock_preserves_each_items_calibrated_probability():
@@ -87,3 +89,12 @@ def test_shock_preserves_each_items_calibrated_probability():
     assert samples.mean() == pytest.approx(0.85, abs=0.005)
     low = simulate_pct_done(np.full(20, 0.1), np.ones(20), sigma=2.0, n_draws=200_000, seed=0)
     assert low.mean() == pytest.approx(0.1, abs=0.005)
+
+
+def test_rollup_adds_the_points_already_done():
+    all_done = simulate_pct_done(np.ones(3), np.array([1.0, 2.0, 3.0]), sigma=0.5, n_draws=2000, seed=0,
+                                 done_points=4.0, total_points=10.0)
+    assert all_done.mean() == pytest.approx(1.0, abs=1e-3)
+    nothing_open = simulate_pct_done(np.array([]), np.array([]), 0.5, n_draws=10, done_points=3.0, total_points=8.0)
+    assert np.all(nothing_open == 3 / 8)
+    assert np.isnan(simulate_pct_done(np.array([0.5]), np.array([1.0]), 0.5, n_draws=10, total_points=0.0)).all()

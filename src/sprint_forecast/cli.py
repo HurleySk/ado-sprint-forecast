@@ -29,7 +29,7 @@ from sprint_forecast.config import (
 )
 from sprint_forecast.export import export_forecasts, write_csv
 from sprint_forecast.extract import PROJECT_ERRORS, describe_error, extract_all
-from sprint_forecast.features import build_features
+from sprint_forecast.features import FEATURE_VERSION, build_checkpoint_frame
 from sprint_forecast.forecast import score_iteration
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.rollup import fit_forecaster
@@ -90,6 +90,10 @@ def _build(cache: CacheData, s: Settings) -> SprintData:
     )
 
 
+def _checkpoint_frame(cache: CacheData, sd: SprintData, s: Settings) -> pd.DataFrame:
+    return build_checkpoint_frame(cache, sd, work_item_types=s.work_item_types, done_categories=s.done_categories)
+
+
 def _pct(x: float) -> str:
     return "n/a" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{100 * x:.0f}%"
 
@@ -123,8 +127,10 @@ def _data(workdir: Path, s: Settings) -> None:
 
 
 def _backtest(workdir: Path, s: Settings, **kwargs) -> None:
-    sd = _build(_load_cache(workdir), s)
-    result = run_backtest(sd, build_features(sd), **kwargs)
+    cache = _load_cache(workdir)
+    sd = _build(cache, s)
+    frame = _checkpoint_frame(cache, sd, s)
+    result = run_backtest(sd, frame[frame["checkpoint"] == 0.0], **kwargs)
     click.echo(format_report(result))
     out = workdir / BACKTEST_FILE
     write_csv(result.sprint_rows, out)
@@ -132,28 +138,34 @@ def _backtest(workdir: Path, s: Settings, **kwargs) -> None:
 
 
 def _train(workdir: Path, s: Settings) -> dict:
-    sd = _build(_load_cache(workdir), s)
-    frame = build_features(sd)
+    cache = _load_cache(workdir)
+    sd = _build(cache, s)
+    frame = _checkpoint_frame(cache, sd, s)
     try:
         fc = fit_forecaster(frame, seed=0)
     except ValueError as e:
         raise click.ClickException(f"cannot train: {e}") from None
+    known = frame[frame["y"].notna()]
     bundle = {
         "forecaster": fc,
+        "feature_version": FEATURE_VERSION,
         "work_item_types": s.work_item_types,
         "done_categories": s.done_categories,
         "commit_grace_days": s.commit_grace_days,
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_sprints": int(len(sd.sprints)),
-        "n_items": int(frame["y"].notna().sum()),
+        "n_items": int(len(known.drop_duplicates(["sprint_id", "item_id"]))),
+        "n_rows": int(len(known)),
         "version": __version__,
     }
     path = workdir / MODEL_FILE
     joblib.dump(bundle, path)
     click.echo(
-        f"Trained on {bundle['n_sprints']} sprints / {bundle['n_items']} items "
+        f"Trained on {bundle['n_sprints']} sprints / {bundle['n_items']} items / {bundle['n_rows']} checkpoint rows "
         f"(calibration: {fc.item_model.calibration}, sprint shock sigma = {fc.sigma:.2f}) -> {path}"
     )
+    per_checkpoint = known.groupby("checkpoint").size()
+    click.echo("  rows per checkpoint: " + ", ".join(f"{f:.0%} {n}" for f, n in per_checkpoint.items()))
     return bundle
 
 

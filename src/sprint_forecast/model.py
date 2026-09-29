@@ -13,10 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from sprint_forecast.features import DAY1_FEATURES as FEATURES, MISSING
-
-CATEGORICAL = ["type", "state_category_at_commit"]  # interim until model A trains on checkpoint rows
-NUMERIC = [f for f in FEATURES if f not in CATEGORICAL]
+from sprint_forecast.features import CATEGORICAL, FEATURES, MISSING, NUMERIC
 
 LGBM_PARAMS = {
     "num_leaves": 15,
@@ -37,7 +34,7 @@ P_CLIP = 1e-4
 
 FEATURE_LABELS = {
     "type": "work item type",
-    "state_category_at_commit": "state at commit",
+    "state_category": "state",
     "points": "item size in points",
     "points_rel": "item size vs team velocity",
     "is_unestimated": "item is unestimated",
@@ -46,6 +43,7 @@ FEATURE_LABELS = {
     "days_since_change": "days since last change",
     "revisions_so_far": "number of edits so far",
     "has_parent": "has a parent item",
+    "is_unassigned": "item is unassigned",
     "load_ratio": "sprint load vs team velocity",
     "n_items": "items committed to the sprint",
     "bug_share": "share of bugs in the sprint",
@@ -55,7 +53,13 @@ FEATURE_LABELS = {
     "sprint_length_days": "sprint length in days",
     "team_sprint_index": "team's number of earlier sprints",
     "assignee_load_ratio": "assignee load vs their recent delivery",
-    "is_unassigned": "item is unassigned",
+    "elapsed": "share of the sprint passed",
+    "days_left": "days left in the sprint",
+    "done_share": "share of committed points done",
+    "days_in_state": "days in the current state",
+    "n_state_changes": "state changes this sprint",
+    "is_added": "added after day 1",
+    "reassigned": "reassigned since day 1",
 }
 
 
@@ -125,6 +129,14 @@ def _calibrate(model: ItemModel, raw: np.ndarray) -> np.ndarray:
     return np.clip(p, P_CLIP, 1 - P_CLIP)
 
 
+def _shock_groups(frame: pd.DataFrame) -> np.ndarray:
+    """Rows that share one sprint shock: a sprint at one checkpoint."""
+    sid = frame["sprint_id"].astype(str)
+    if "checkpoint" not in frame:
+        return sid.to_numpy()
+    return (sid + "@" + frame["checkpoint"].astype(str)).to_numpy()
+
+
 def train_item_model(frame: pd.DataFrame, seed: int = 0) -> ItemModel:
     frame = frame[frame["y"].notna()]
     if frame["y"].nunique() < 2:
@@ -138,7 +150,7 @@ def train_item_model(frame: pd.DataFrame, seed: int = 0) -> ItemModel:
     lgbm = LGBMClassifier(**LGBM_PARAMS, random_state=seed)
     lgbm.fit(to_matrix(fit, categories), fit["y"].astype(int))
     lr = _make_lr().fit(_lr_input(fit), fit["y"].astype(int))
-    model = ItemModel(lgbm, lr, None, "none", categories, pd.DataFrame(columns=["sprint_id", "p", "y"]))
+    model = ItemModel(lgbm, lr, None, "none", categories, pd.DataFrame(columns=["sprint_id", "group", "p", "y"]))
     if len(cal) and cal["y"].nunique() == 2:
         raw = lgbm.predict_proba(to_matrix(cal, categories))[:, 1]
         y = cal["y"].astype(int).to_numpy()
@@ -151,6 +163,7 @@ def train_item_model(frame: pd.DataFrame, seed: int = 0) -> ItemModel:
     if len(cal):
         model.calib_frame = pd.DataFrame({
             "sprint_id": cal["sprint_id"].to_numpy(),
+            "group": _shock_groups(cal),
             "p": predict_proba(model, cal),
             "y": cal["y"].astype(int).to_numpy(),
         })
@@ -192,7 +205,7 @@ def _count(v, unit: str) -> str:
 # A driver's value in plain words: shares as percentages, ratios as multiples, days rounded, flags as statements.
 PHRASES = {
     "type": lambda v: f"item is a {v}",
-    "state_category_at_commit": lambda v: f"state at commit was {v}",
+    "state_category": lambda v: f"state is {v}",
     "points": lambda v: f"item size is {v:g} point{'' if v == 1 else 's'}",
     "points_rel": lambda v: f"item size is {_times(v)} team velocity",
     "is_unestimated": lambda v: "item is unestimated" if v else "item is estimated",
@@ -201,6 +214,7 @@ PHRASES = {
     "days_since_change": lambda v: f"no change in {_count(v, 'day')}",
     "revisions_so_far": lambda v: f"{_count(v, 'edit')} so far",
     "has_parent": lambda v: "item has a parent" if v else "item has no parent",
+    "is_unassigned": lambda v: "item is unassigned" if v else "item is assigned",
     "load_ratio": lambda v: f"sprint load is {_times(v)} team velocity",
     "n_items": lambda v: f"{_count(v, 'item')} committed to the sprint",
     "bug_share": lambda v: f"{_pct(v)} of the sprint's items are bugs",
@@ -210,7 +224,13 @@ PHRASES = {
     "sprint_length_days": lambda v: f"sprint is {_count(v, 'day')} long",
     "team_sprint_index": lambda v: f"team has {_count(v, 'earlier sprint')}",
     "assignee_load_ratio": lambda v: f"assignee load is {_times(v)} their recent delivery",
-    "is_unassigned": lambda v: "item is unassigned" if v else "item is assigned",
+    "elapsed": lambda v: f"{_pct(v)} of the sprint has passed",
+    "days_left": lambda v: f"{_count(v, 'day')} left",
+    "done_share": lambda v: f"{_pct(v)} of committed points done",
+    "days_in_state": lambda v: f"in the same state for {_count(v, 'day')}",
+    "n_state_changes": lambda v: f"{_count(v, 'state change')} this sprint",
+    "is_added": lambda v: "added after day 1" if v else "committed on day 1",
+    "reassigned": lambda v: "reassigned since day 1" if v else "same assignee as on day 1",
 }
 
 
@@ -230,8 +250,11 @@ def _is_missing(value) -> bool:
 def _describe(feature: str, values: pd.Series) -> str:
     if not _is_missing(values[feature]):
         return PHRASES[feature](values[feature])
-    if feature == "assignee_load_ratio" and values.get("is_unassigned") == 1:
-        return "item is unassigned"
+    if feature == "assignee_load_ratio":
+        if values.get("is_unassigned") == 1:
+            return "item is unassigned"
+        if values.get("is_added") == 1:
+            return "added after day 1"
     return MISSING_PHRASES.get(feature, f"{FEATURE_LABELS[feature]} unknown")
 
 
