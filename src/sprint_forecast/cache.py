@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS iterations (
 CREATE TABLE IF NOT EXISTS teams (project TEXT NOT NULL, team_sk TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS team_areas (team_sk TEXT NOT NULL, area_path TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS team_iterations (team_sk TEXT NOT NULL, iteration_path TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS users (user_sk TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -51,6 +52,7 @@ class CacheData:
     team_areas: pd.DataFrame
     team_iterations: pd.DataFrame
     extracted_at: dict[str, pd.Timestamp] = field(default_factory=dict)  # project -> when its data was pulled
+    users: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["user_sk", "name"]))  # display names
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -135,6 +137,14 @@ def replace_project_teams(
     )
 
 
+def upsert_users(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Store Analytics user keys with their display names; a known key takes the newest name."""
+    cur = conn.executemany(
+        "INSERT OR REPLACE INTO users(user_sk, name) VALUES (?, ?)", ((r["user_sk"], r.get("name")) for r in rows)
+    )
+    return cur.rowcount
+
+
 def fill_state_categories(revs: pd.DataFrame) -> pd.DataFrame:
     """Analytics leaves StateCategory null on some revisions. Use the category the same state name has elsewhere
     in the project, else the state's meaning in the built-in processes; unknown names stay missing."""
@@ -185,4 +195,5 @@ def load_cache(conn: sqlite3.Connection, projects: list[str] | None = None) -> C
     extracted = {k[len(EXTRACTED_PREFIX):]: pd.Timestamp(v).tz_convert("UTC") for k, v in rows}
     if projects:
         extracted = {p: t for p, t in extracted.items() if p in projects}
-    return CacheData(revs, its, teams, team_areas, team_iterations, extracted)
+    users = pd.read_sql_query("SELECT user_sk, name FROM users", conn)
+    return CacheData(revs, its, teams, team_areas, team_iterations, extracted, users)

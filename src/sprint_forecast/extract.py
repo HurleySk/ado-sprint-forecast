@@ -27,6 +27,7 @@ from sprint_forecast.cache import (
     replace_project_teams,
     set_meta,
     upsert_revisions,
+    upsert_users,
     watermark_key,
 )
 
@@ -37,6 +38,7 @@ REVISION_SELECT = (
 REVISION_EXPAND = "Iteration($select=IterationPath),Area($select=AreaPath),AssignedTo($select=UserSK)"
 ITERATION_SELECT = "IterationSK,IterationPath,IterationName,StartDate,EndDate,IsEnded"
 TEAM_SELECT = "TeamSK,TeamName"
+USER_SELECT = "UserSK,UserName"
 TEAM_EXPAND = "Areas($select=AreaPath),Iterations($select=IterationPath)"
 OPTIONAL_SELECT = ("StoryPoints", "Effort", "ParentWorkItemId")  # not every process has these
 OPTIONAL_EXPAND = {"AssignedTo": "AssignedTo", "UserSK": "AssignedTo"}
@@ -52,6 +54,8 @@ class ExtractResult:
     inserted: int = 0
     iterations: int = 0
     teams: int = 0
+    users: int = 0
+    users_failed: str | None = None  # user names could not be read; the rest of the extract still ran
     skipped: str | None = None
     failed: str | None = None
     dropped: list[str] = field(default_factory=list)
@@ -122,6 +126,19 @@ def iterations_url(org: str, project: str) -> str:
 
 def teams_url(org: str, project: str) -> str:
     return odata_url(org, project, "Teams", {"$select": TEAM_SELECT, "$expand": TEAM_EXPAND})
+
+
+def users_url(org: str, project: str) -> str:
+    return odata_url(org, project, "Users", {"$select": USER_SELECT})
+
+
+def _fetch_users(fetch_json: FetchJson, org: str, project: str) -> tuple[list[dict], str | None]:
+    """Display names for the assignee keys on revisions. Names are optional, so an HTTP error is returned, not raised."""
+    try:
+        rows = [{"user_sk": r["UserSK"], "name": r.get("UserName")} for r in paginate(fetch_json, users_url(org, project))]
+    except HttpError as e:
+        return [], f"HTTP {e.status}"
+    return rows, None
 
 
 def _nav(raw: dict, nav: str, prop: str):
@@ -195,6 +212,7 @@ def extract_project(
             subs.extend(s)
         since = None if full else _since(get_meta(conn, watermark_key(project)), overlap_days)
         rows, result.dropped = _fetch_revisions(fetch_json, org, project, work_item_types, since)
+        users, result.users_failed = _fetch_users(fetch_json, org, project)
     except HttpError as e:
         if e.status in (401, 403):
             result.skipped = f"HTTP {e.status}: no Analytics access"
@@ -206,12 +224,13 @@ def extract_project(
         result.inserted = upsert_revisions(conn, rows)
         replace_project_iterations(conn, project, iterations)
         replace_project_teams(conn, project, teams, areas, subs)
+        upsert_users(conn, users)
         newest = max_changed(conn, project)
         if newest:
             set_meta(conn, watermark_key(project), newest)
         set_meta(conn, extracted_key(project), started)
         set_meta(conn, "last_extract", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    result.fetched, result.iterations, result.teams = len(rows), len(iterations), len(teams)
+    result.fetched, result.iterations, result.teams, result.users = len(rows), len(iterations), len(teams), len(users)
     return result
 
 
@@ -240,6 +259,8 @@ def extract_all(
             echo(f"  {project}: skipped ({r.skipped})")
         else:
             note = f"; not available in this project: {', '.join(r.dropped)}" if r.dropped else ""
+            if r.users_failed:
+                note += f"; user names unavailable ({r.users_failed})"
             echo(
                 f"  {project}: {r.fetched} revisions fetched ({r.inserted} new), "
                 f"{r.iterations} iterations, {r.teams} teams{note}"

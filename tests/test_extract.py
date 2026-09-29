@@ -39,6 +39,7 @@ class FakeAnalytics:
         self.denied = set()
         self.broken = {}
         self.unavailable = {}
+        self.entity_errors = {}
         self.calls = []
 
     def __call__(self, url):
@@ -48,6 +49,8 @@ class FakeAnalytics:
         project, entity = m.group(1), m.group(2)
         if project in self.denied:
             raise HttpError(401, url)
+        if (project, entity) in self.entity_errors:
+            raise HttpError(self.entity_errors[(project, entity)], url)
         if project in self.broken:
             raise HttpError(self.broken[project], url, '{"error":{"code":"0","message":"server trouble"}}')
         for prop in self.unavailable.get(project, ()):
@@ -257,4 +260,29 @@ def test_late_arriving_revision_before_the_watermark_is_picked_up(tmp_path, fake
     fake.calls.clear()
     extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES, overlap_days=0)
     assert "ChangedDate ge 2024-05-25T14:00:00.000Z" in unquote([u for u in fake.calls if "WorkItemRevisions" in u][0])
+    conn.close()
+
+
+def test_user_names_are_stored_and_kept_current(tmp_path, fake):
+    conn = connect(tmp_path / "cache.db")
+    fake.data[("Alpha", "Users")] = [{"UserSK": "u1", "UserName": "Pat Example"}, {"UserSK": "u2", "UserName": "Sam Sample"}]
+    r = extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
+    assert r.users == 2
+    assert "$select=UserSK,UserName" in unquote([u for u in fake.calls if "/Users" in u][0])
+    fake.data[("Alpha", "Users")] = [{"UserSK": "u1", "UserName": "Pat Renamed"}]
+    extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)
+    users = load_cache(conn).users
+    assert dict(zip(users["user_sk"], users["name"])) == {"u1": "Pat Renamed", "u2": "Sam Sample"}
+    conn.close()
+
+
+def test_user_names_unavailable_does_not_stop_the_extract(tmp_path, fake):
+    conn = connect(tmp_path / "cache.db")
+    fake.entity_errors[("Alpha", "Users")] = 403
+    lines = []
+    [r] = extract_all(fake, conn, ORG, ["Alpha"], work_item_types=TYPES, echo=lines.append)
+    assert (r.fetched, r.skipped, r.failed, r.users) == (2, None, None, 0)
+    assert r.users_failed == "HTTP 403"
+    assert "user names unavailable (HTTP 403)" in lines[0]
+    assert load_cache(conn).users.empty
     conn.close()

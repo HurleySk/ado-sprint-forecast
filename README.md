@@ -46,23 +46,26 @@ put for the rest of the sprint) and each team's next sprint (scored on the scope
 | `sprint_forecasts/<run_id>.csv` | run x team sprint | status, committed items and points, load vs velocity, P(full), P(>=80%), expected, p10/p50/p90, share done so far |
 | `item_forecasts/<run_id>.csv` | run x committed item | work item ID, points, probability of done, top 3 risk factors, state now, done so far |
 | `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends) |
+| `items.csv` | reconstructed sprint x committed item | points, sprints already carried over, assignee at the commit cutoff (display name), done (empty until the sprint ends) |
 | `backtest.csv` | backtested sprint and model | predicted band vs actual, copied from the last `backtest` run |
 
 Forecast files are added per run and never rewritten, so the history (progress against the day-1 forecast)
-builds up; `sprints.csv` and `backtest.csv` are replaced. Files are written to a temp name and renamed, so a
+builds up; `sprints.csv`, `items.csv` and `backtest.csv` are replaced. Files are written to a temp name and renamed, so a
 sync client or a refresh never reads half a file. Timestamps are UTC (`2024-06-10T05:00:00Z`).
 
-The files carry no titles or people; join `item_id` to Azure DevOps (e.g. the Analytics OData `WorkItems` feed)
-for titles and assignees. A typical schedule: `extract` then `export` daily, `train` and `backtest` weekly,
+The files carry no titles; join `item_id` to Azure DevOps (e.g. the Analytics OData `WorkItems` feed) for them.
+`items.csv` names who held each item when the sprint was committed, for delivery by person; items with no
+assignee are left blank, and a user key Analytics has no name for reads `Unknown user`. A typical schedule: `extract` then `export` daily, `train` and `backtest` weekly,
 with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI reads with its folder connector.
 
 ## How it works
 
-- **Extract**: Analytics OData `WorkItemRevisions`, `Iterations` and `Teams` per project into a local
+- **Extract**: Analytics OData `WorkItemRevisions`, `Iterations`, `Teams` and `Users` per project into a local
   SQLite cache, with per-project watermarks (each run re-reads the last day to catch late revisions).
   A project that returns 401/403 is skipped; fields its process lacks (e.g. `StoryPoints`) are dropped
   from the query; any other failure is reported, the remaining projects still run, and the exit code is 1.
-  A missing `StateCategory` is inferred from the state name.
+  A missing `StateCategory` is inferred from the state name. User names are optional: if `Users` cannot be
+  read, the extract carries on and says so.
 - **Sprint** = (project, team, iteration with dates). Items are assigned to the subscribed team whose area
   path matches exactly, else by longest prefix, else the only subscribed team; otherwise they are
   reported as unassigned. Committed scope is what sits in the iteration at start + 1 day (the commit
@@ -81,9 +84,10 @@ with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI re
 
 This repository contains code only. The cache, trained models and backtest output live in
 `.sprint-forecast/`, which is git-ignored along with `*.db`, `*.sqlite`, `*.jsonl`, `*.parquet`,
-`*.joblib` and `.env`. Assignees are kept only as opaque Analytics user keys and used only as numeric
-load features. Work item titles are fetched on demand for display and never stored. `export` writes to the folder you
-name: project, team and iteration names, work item IDs and numbers, no titles or people.
+`*.joblib` and `.env`. The model sees assignees only as numeric load features computed from opaque Analytics
+user keys; the cache also keeps each key's display name so `export` can name assignees in `items.csv`. Work item
+titles are fetched on demand for display and never stored. `export` writes to the folder you name: project, team
+and iteration names, work item IDs and numbers, and assignee names in `items.csv`; no titles.
 
 ## Development
 

@@ -19,6 +19,7 @@ from sprint_forecast.timeline import as_of_many, to_utc
 SPRINT_FORECASTS_DIR = "sprint_forecasts"
 ITEM_FORECASTS_DIR = "item_forecasts"
 SPRINTS_FILE = "sprints.csv"
+ITEM_HISTORY_FILE = "items.csv"
 BACKTEST_FILE = "backtest.csv"
 N_RISK_FACTORS = 3
 ISO_UTC = "%Y-%m-%dT%H:%M:%SZ"
@@ -36,6 +37,11 @@ ITEM_FORECAST_COLUMNS = [
     "is_unestimated", "carryover_count", "p_done", *RISK_FACTOR_COLUMNS,
     "state_category_now", "in_sprint_now", "done_now",
 ]
+ITEM_HISTORY_COLUMNS = [
+    "sprint_id", "item_id", "type", "points", "is_unestimated", "carryover_count", "assignee", "done",
+    "state_category_at_end",
+]
+UNKNOWN_USER = "Unknown user"
 
 
 @dataclass
@@ -92,6 +98,30 @@ def progress_at(cache: CacheData, items: pd.DataFrame, t, done_categories: list[
     )
 
 
+def assignee_names(keys: pd.Series, users: pd.DataFrame) -> pd.Series:
+    """Display name for each Analytics user key: None when unassigned, UNKNOWN_USER for a key with no name."""
+    names = keys.map(dict(zip(users["user_sk"], users["name"])))
+    names = names.where(names.notna() | keys.isna(), UNKNOWN_USER)
+    return names.astype(object).where(names.notna(), None)
+
+
+def item_history(history, users: pd.DataFrame) -> pd.DataFrame:
+    """Every item committed to a reconstructed sprint, with who held it at the commit cutoff and whether it was
+    done by the end (empty until the sprint ends)."""
+    items = history.items
+    return pd.DataFrame({
+        "sprint_id": items["sprint_id"],
+        "item_id": items["item_id"].astype("int64"),
+        "type": items["type"],
+        "points": items["points"],
+        "is_unestimated": items["is_unestimated"].astype(bool),
+        "carryover_count": items["carryover_count"].astype("int64"),
+        "assignee": assignee_names(items["assigned_to_sk"], users),
+        "done": items["done"],
+        "state_category_at_end": items["state_category_at_end"],
+    })[ITEM_HISTORY_COLUMNS]
+
+
 def _item_rows(fc, scored: ScoredSprint, progress: pd.DataFrame, run_id: str, key: str) -> pd.DataFrame:
     rows = scored.items
     contrib = contributions(fc.item_model, rows)
@@ -139,7 +169,8 @@ def export_forecasts(
 ) -> ExportResult:
     """Forecast every running team sprint (scored at its commit cutoff) and each team's next sprint (scored on
     its scope now). Appends sprint_forecasts/<run_id>.csv and item_forecasts/<run_id>.csv; replaces sprints.csv
-    (every reconstructed sprint and its outcome) and, when `backtest_csv` exists, backtest.csv."""
+    (every reconstructed sprint and its outcome), items.csv (every committed item, its assignee and outcome) and,
+    when `backtest_csv` exists, backtest.csv."""
     out = Path(out)
     now = pd.Timestamp.now(tz="UTC").floor("s") if now is None else to_utc(now)
     run_id = now.strftime("%Y%m%dT%H%M%SZ")
@@ -171,6 +202,7 @@ def export_forecasts(
         write_csv(sprints, out / SPRINT_FORECASTS_DIR / f"{run_id}.csv"),
         write_csv(items, out / ITEM_FORECASTS_DIR / f"{run_id}.csv"),
         write_csv(history.sprints[SPRINT_COLUMNS], out / SPRINTS_FILE),
+        write_csv(item_history(history, cache.users), out / ITEM_HISTORY_FILE),
     ]
     if backtest_csv is not None and Path(backtest_csv).exists():
         files.append(_copy(Path(backtest_csv), out / BACKTEST_FILE))

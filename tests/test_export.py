@@ -5,7 +5,9 @@ from conftest import SYNTH_TYPES
 from helpers import build_cache, rev
 from sprint_forecast.export import (
     ITEM_FORECAST_COLUMNS,
+    ITEM_HISTORY_COLUMNS,
     SPRINT_FORECAST_COLUMNS,
+    assignee_names,
     export_forecasts,
     progress_at,
     select_sprints,
@@ -143,9 +145,33 @@ def test_export_appends_forecasts_per_run_and_replaces_snapshots(exported, synth
     assert (out / "backtest.csv").read_text(encoding="utf-8") == "sprint_id,model\nx,a\n"
 
 
+def test_assignee_names_are_blank_when_unassigned_and_flag_unknown_keys():
+    users = pd.DataFrame({"user_sk": ["u1", "u2"], "name": ["Pat Example", "Sam Sample"]})
+    names = assignee_names(pd.Series(["u1", None, "u9", "u2"]), users)
+    assert names.tolist() == ["Pat Example", None, "Unknown user", "Sam Sample"]
+
+
+def test_export_writes_every_committed_item_with_its_assignee(exported, synth16):
+    out, _, _ = exported
+    items = pd.read_csv(out / "items.csv")
+    assert list(items.columns) == ITEM_HISTORY_COLUMNS
+    history = synth16.sprints.items
+    assert items["item_id"].tolist() == history["item_id"].tolist()
+    names = dict(zip(synth16.cache.users["user_sk"], synth16.cache.users["name"]))
+    assert items["assignee"].fillna("").tolist() == history["assigned_to_sk"].map(names).fillna("").tolist()
+    assert items["assignee"].isna().any() and items["assignee"].nunique() >= 8
+    outcomes = pd.read_csv(out / "sprints.csv").set_index("sprint_id")
+    closed = outcomes.index[outcomes["done_points"].notna()]
+    done = items.assign(w=items["points"] * items["done"]).groupby("sprint_id")["w"].sum()
+    assert done[closed].to_numpy() == pytest.approx(outcomes.loc[closed, "done_points"].to_numpy())
+    assert items.loc[items["sprint_id"].isin(closed), "done"].isin([0, 1]).all()
+    assert items.loc[~items["sprint_id"].isin(closed), "done"].isna().all()
+
+
 def test_export_with_nothing_running_still_writes_headers(synth16, bundle, tmp_path):
     result = export_forecasts(synth16.cache, bundle, tmp_path, now=pd.Timestamp("2030-01-01T00:00:00Z"))
     assert result.sprints.empty
     assert list(pd.read_csv(tmp_path / "sprint_forecasts" / f"{result.run_id}.csv").columns) == SPRINT_FORECAST_COLUMNS
     assert list(pd.read_csv(tmp_path / "item_forecasts" / f"{result.run_id}.csv").columns) == ITEM_FORECAST_COLUMNS
     assert not (tmp_path / "backtest.csv").exists()
+    assert list(pd.read_csv(tmp_path / "items.csv").columns) == ITEM_HISTORY_COLUMNS

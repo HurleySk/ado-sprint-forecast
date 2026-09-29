@@ -29,6 +29,16 @@ def test_names_are_synthetic():
     assert {r["project"] for r in data["revisions"]} == {"Alpha", "Beta"}
 
 
+def test_every_synthetic_assignee_has_a_synthetic_name(tmp_path):
+    data = simulate(seed=0, n_sprints=6)
+    sks = {r["assigned_to_sk"] for r in data["revisions"] if r["assigned_to_sk"]}
+    names = {u["user_sk"]: u["name"] for u in data["users"]}
+    assert sks and sks <= set(names)
+    assert len(set(names.values())) == len(names)
+    cache = load_cache(connect(generate(tmp_path / "cache.db", seed=0, n_sprints=6)))
+    assert dict(zip(cache.users["user_sk"], cache.users["name"])) == names
+
+
 def test_planted_mess_is_present():
     data = simulate(seed=0, n_sprints=12)
     revs = pd.DataFrame(data["revisions"])

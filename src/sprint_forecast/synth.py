@@ -17,6 +17,7 @@ from sprint_forecast.cache import (
     replace_project_teams,
     set_meta,
     upsert_revisions,
+    upsert_users,
     watermark_key,
 )
 
@@ -32,6 +33,7 @@ SIZE_P = [0.12, 0.20, 0.25, 0.22, 0.14, 0.07]
 UNPOINTED_SHARE = 0.15
 EPOCH = datetime(2024, 1, 8, 5, 0, tzinfo=timezone.utc)  # Monday 00:00 at UTC-05:00
 PROJECT_OFFSET_DAYS = {"Alpha": 0, "Beta": 3}
+MEMBER_NAMES = ("Ash", "Bex", "Cal", "Dee")  # with the team's colour, e.g. "Ash Red"
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,7 @@ class _Sim:
         self.n_sprints = n_sprints
         self.ids = itertools.count(1000)
         self.items: list[_Item] = []
+        self.users: list[dict] = []
 
     def u(self, lo: float, hi: float) -> float:
         return float(self.rng.uniform(lo, hi))
@@ -129,6 +132,8 @@ class _Sim:
     def run_team(self, team: SynthTeam) -> None:
         rng = self.rng
         members = [str(uuid.UUID(bytes=rng.bytes(16), version=4)) for _ in range(4)]
+        colour = team.name.split()[-1]
+        self.users.extend({"user_sk": sk, "name": f"{first} {colour}"} for sk, first in zip(members, MEMBER_NAMES))
         carry: list[tuple[_Item, int, float]] = []
         delivered_history: list[float] = []
         for k in range(self.n_sprints):
@@ -228,7 +233,7 @@ def simulate(seed: int = 0, n_sprints: int = 40) -> dict[str, list[dict]]:
             })
     return {
         "revisions": revisions, "iterations": iterations, "teams": teams,
-        "team_areas": team_areas, "team_iterations": team_iterations,
+        "team_areas": team_areas, "team_iterations": team_iterations, "users": sim.users,
     }
 
 
@@ -253,6 +258,7 @@ def generate(path: Path | str, *, seed: int = 0, n_sprints: int = 40) -> Path:
     conn = connect(path)
     try:
         upsert_revisions(conn, data["revisions"])
+        upsert_users(conn, data["users"])
         for project in PROJECT_OFFSET_DAYS:
             replace_project_iterations(conn, project, [r for r in data["iterations"] if r["project"] == project])
             replace_project_teams(
