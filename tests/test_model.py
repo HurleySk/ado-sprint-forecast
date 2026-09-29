@@ -89,16 +89,42 @@ def test_describe_drivers_in_plain_words():
     contrib = pd.Series({f: 0.0 for f in FEATURES} | {"carryover_count": -0.9, "load_ratio": -0.4, "points": 0.3})
     values = pd.Series({f: np.nan for f in FEATURES} | {"carryover_count": 2.0, "load_ratio": 1.456})
     assert describe_drivers(contrib, values) == [
-        "sprints already carried over = 2",
-        "sprint load vs team velocity = 1.46",
+        "already carried over 2 sprints",
+        "sprint load is 1.5× team velocity",
     ]
     assert describe_drivers(contrib.clip(lower=0), values) == []
     flags = pd.Series({f: 0.0 for f in FEATURES} | {"is_unestimated": -0.5, "team_trailing_completion": -0.2})
     flag_values = pd.Series({f: np.nan for f in FEATURES} | {"is_unestimated": 1.0})
     assert describe_drivers(flags, flag_values) == [
-        "item is unestimated = yes",
+        "item is unestimated",
         "team has no earlier sprints",
     ]
+
+
+@pytest.mark.parametrize("feature, value, text", [
+    ("unestimated_share", 0.75, "75% of the sprint's items are unestimated"),
+    ("bug_share", 0.5, "50% of the sprint's items are bugs"),
+    ("carryover_share", 0.696, "70% of the sprint's items were carried over"),
+    ("team_trailing_completion", 0.322, "team recently finished 32% of committed points"),
+    ("assignee_load_ratio", 4.5, "assignee load is 4.5× their recent delivery"),
+    ("points_rel", 0.173, "item size is 0.17× team velocity"),
+    ("days_since_change", 32.8, "no change in 33 days"),
+    ("age_days", 1.0, "item is 1 day old"),
+    ("sprint_length_days", 38.0, "sprint is 38 days long"),
+    ("carryover_count", 1.0, "already carried over 1 sprint"),
+    ("points", 0.5, "item size is 0.5 points"),
+    ("n_items", 40.0, "40 items committed to the sprint"),
+    ("revisions_so_far", 12.0, "12 edits so far"),
+    ("team_sprint_index", 7.0, "team has 7 earlier sprints"),
+    ("has_parent", 0.0, "item has no parent"),
+    ("is_unassigned", 1.0, "item is unassigned"),
+    ("type", "Bug", "item is a Bug"),
+    ("state_category_at_commit", "Proposed", "state at commit was Proposed"),
+])
+def test_describe_drivers_reads_as_a_sentence(feature, value, text):
+    contrib = pd.Series({f: 0.0 for f in FEATURES} | {feature: -1.0})
+    values = pd.Series({f: np.nan for f in FEATURES} | {feature: value}, dtype=object)
+    assert describe_drivers(contrib, values, k=1) == [text]
 
 
 def test_describe_drivers_says_why_a_value_is_missing():

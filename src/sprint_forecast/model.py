@@ -173,7 +173,42 @@ def contributions(model: ItemModel, frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(np.asarray(values), columns=FEATURES + ["bias"], index=frame.index)
 
 
-BOOLEAN_FEATURES = {"is_unestimated", "has_parent", "is_unassigned"}
+def _pct(v) -> str:
+    return f"{round(100 * v)}%"
+
+
+def _times(v) -> str:
+    return f"{v:.0f}×" if v >= 10 else f"{v:.2g}×"
+
+
+def _count(v, unit: str) -> str:
+    n = round(v)
+    return f"{n} {unit}{'' if n == 1 else 's'}"
+
+
+# A driver's value in plain words: shares as percentages, ratios as multiples, days rounded, flags as statements.
+PHRASES = {
+    "type": lambda v: f"item is a {v}",
+    "state_category_at_commit": lambda v: f"state at commit was {v}",
+    "points": lambda v: f"item size is {v:g} point{'' if v == 1 else 's'}",
+    "points_rel": lambda v: f"item size is {_times(v)} team velocity",
+    "is_unestimated": lambda v: "item is unestimated" if v else "item is estimated",
+    "carryover_count": lambda v: f"already carried over {_count(v, 'sprint')}",
+    "age_days": lambda v: f"item is {_count(v, 'day')} old",
+    "days_since_change": lambda v: f"no change in {_count(v, 'day')}",
+    "revisions_so_far": lambda v: f"{_count(v, 'edit')} so far",
+    "has_parent": lambda v: "item has a parent" if v else "item has no parent",
+    "load_ratio": lambda v: f"sprint load is {_times(v)} team velocity",
+    "n_items": lambda v: f"{_count(v, 'item')} committed to the sprint",
+    "bug_share": lambda v: f"{_pct(v)} of the sprint's items are bugs",
+    "carryover_share": lambda v: f"{_pct(v)} of the sprint's items were carried over",
+    "unestimated_share": lambda v: f"{_pct(v)} of the sprint's items are unestimated",
+    "team_trailing_completion": lambda v: f"team recently finished {_pct(v)} of committed points",
+    "sprint_length_days": lambda v: f"sprint is {_count(v, 'day')} long",
+    "team_sprint_index": lambda v: f"team has {_count(v, 'earlier sprint')}",
+    "assignee_load_ratio": lambda v: f"assignee load is {_times(v)} their recent delivery",
+    "is_unassigned": lambda v: "item is unassigned" if v else "item is assigned",
+}
 
 
 # Why a history feature is NaN, said plainly (see features.team_history and features.assignee_load).
@@ -189,24 +224,16 @@ def _is_missing(value) -> bool:
     return isinstance(value, (float, np.floating)) and np.isnan(value)
 
 
-def _fmt(feature: str, value) -> str:
-    if feature in BOOLEAN_FEATURES:
-        return "yes" if value else "no"
-    if isinstance(value, (float, np.floating)):
-        return f"{value:.3g}"
-    return str(value)
-
-
 def _describe(feature: str, values: pd.Series) -> str:
     if not _is_missing(values[feature]):
-        return f"{FEATURE_LABELS[feature]} = {_fmt(feature, values[feature])}"
+        return PHRASES[feature](values[feature])
     if feature == "assignee_load_ratio" and values.get("is_unassigned") == 1:
         return "item is unassigned"
     return MISSING_PHRASES.get(feature, f"{FEATURE_LABELS[feature]} unknown")
 
 
 def describe_drivers(contrib: pd.Series, values: pd.Series, k: int = 2) -> list[str]:
-    """The k most negative contributions, in plain words, e.g. 'sprints already carried over = 2'.
+    """The k most negative contributions, in plain words, e.g. 'already carried over 2 sprints'.
     Features that read the same (both velocity ratios when the team has no velocity) are listed once."""
     neg = contrib[FEATURES]
     out: list[str] = []
