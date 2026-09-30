@@ -23,6 +23,7 @@ from sprint_forecast.cache import (
     extracted_key,
     get_meta,
     max_changed,
+    replace_project_exclusions,
     replace_project_iterations,
     replace_project_teams,
     set_meta,
@@ -56,6 +57,8 @@ class ExtractResult:
     teams: int = 0
     users: int = 0
     users_failed: str | None = None  # user names could not be read; the rest of the extract still ran
+    excluded: int = 0  # items left out because their title matched the pattern
+    titles_failed: str | None = None  # titles could not be read; the previous exclusions stay
     skipped: str | None = None
     failed: str | None = None
     dropped: list[str] = field(default_factory=list)
@@ -141,6 +144,26 @@ def _fetch_users(fetch_json: FetchJson, org: str, project: str) -> tuple[list[di
     return rows, None
 
 
+def work_items_url(org: str, project: str, work_item_types: list[str]) -> str:
+    types = ",".join(odata_string(t) for t in work_item_types)
+    return odata_url(org, project, "WorkItems", {"$select": "WorkItemId,Title", "$filter": f"WorkItemType in ({types})"})
+
+
+def _fetch_exclusions(
+    fetch_json: FetchJson, org: str, project: str, work_item_types: list[str], pattern: str,
+) -> tuple[list[int] | None, str | None]:
+    """Ids of the project's items whose current title matches `pattern` (case-insensitive); titles are matched here
+    and dropped. None and the error when titles cannot be read."""
+    if not pattern:
+        return [], None
+    rx = re.compile(pattern, re.IGNORECASE)
+    try:
+        rows = list(paginate(fetch_json, work_items_url(org, project, work_item_types)))
+    except HttpError as e:
+        return None, f"HTTP {e.status}"
+    return sorted(int(r["WorkItemId"]) for r in rows if rx.search(r.get("Title") or "")), None
+
+
 def _nav(raw: dict, nav: str, prop: str):
     value = raw.get(nav)
     return value.get(prop) if isinstance(value, dict) else None
@@ -199,6 +222,7 @@ def extract_project(
     work_item_types: list[str],
     full: bool = False,
     overlap_days: float = WATERMARK_OVERLAP_DAYS,
+    exclude_title_pattern: str = "",
 ) -> ExtractResult:
     result = ExtractResult(project)
     started = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -213,6 +237,8 @@ def extract_project(
         since = None if full else _since(get_meta(conn, watermark_key(project)), overlap_days)
         rows, result.dropped = _fetch_revisions(fetch_json, org, project, work_item_types, since)
         users, result.users_failed = _fetch_users(fetch_json, org, project)
+        excluded, result.titles_failed = _fetch_exclusions(
+            fetch_json, org, project, work_item_types, exclude_title_pattern)
     except HttpError as e:
         if e.status in (401, 403):
             result.skipped = f"HTTP {e.status}: no Analytics access"
@@ -225,6 +251,9 @@ def extract_project(
         replace_project_iterations(conn, project, iterations)
         replace_project_teams(conn, project, teams, areas, subs)
         upsert_users(conn, users)
+        if excluded is not None:
+            replace_project_exclusions(conn, project, excluded)
+            result.excluded = len(excluded)
         newest = max_changed(conn, project)
         if newest:
             set_meta(conn, watermark_key(project), newest)
@@ -242,6 +271,7 @@ def extract_all(
     *,
     work_item_types: list[str],
     full: bool = False,
+    exclude_title_pattern: str = "",
     echo: Callable[[str], None] = print,
 ) -> list[ExtractResult]:
     """Extract each project; a project that fails is reported and the rest still run.
@@ -250,7 +280,10 @@ def extract_all(
     results = []
     for project in names:
         try:
-            r = extract_project(fetch_json, conn, org, project, work_item_types=work_item_types, full=full)
+            r = extract_project(
+                fetch_json, conn, org, project, work_item_types=work_item_types, full=full,
+                exclude_title_pattern=exclude_title_pattern,
+            )
         except PROJECT_ERRORS as e:
             r = ExtractResult(project, failed=describe_error(e))
         if r.failed:
@@ -261,6 +294,10 @@ def extract_all(
             note = f"; not available in this project: {', '.join(r.dropped)}" if r.dropped else ""
             if r.users_failed:
                 note += f"; user names unavailable ({r.users_failed})"
+            if r.titles_failed:
+                note += f"; title exclusions not refreshed ({r.titles_failed})"
+            elif r.excluded:
+                note += f"; {r.excluded} items left out by title"
             echo(
                 f"  {project}: {r.fetched} revisions fetched ({r.inserted} new), "
                 f"{r.iterations} iterations, {r.teams} teams{note}"

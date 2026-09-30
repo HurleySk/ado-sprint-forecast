@@ -94,3 +94,17 @@ def test_resolved_ends_the_cycle_when_it_counts_as_done(tmp_path):
     assert build(tmp_path / "a", revs).items.set_index("item_id").loc[8, "days"] == pytest.approx(5.0)
     widened = build(tmp_path / "b", revs, done=("Resolved", "Completed"))
     assert widened.items.set_index("item_id").loc[8, "days"] == pytest.approx(1.5)
+
+
+def test_returns_count_going_back_to_a_state_already_left(tmp_path):
+    cy = build(tmp_path, [
+        rev(1, 1, "2024-03-01T00:00:00.000Z"),
+        rev(1, 2, MON_NOON, **ACTIVE),
+        rev(1, 3, WED, **TESTING),
+        rev(1, 4, THU, **ACTIVE),                                     # back to Active: 1
+        rev(1, 5, "2024-03-07T06:00:00.000Z", story_points=8.0, **ACTIVE),  # an edit, not a move
+        rev(1, 6, FRI_NOON, **TESTING),                               # back to Testing: 2
+        rev(1, 7, NEXT_MON_NOON, **CLOSED),
+        rev(2, 1, MON_NOON, **ACTIVE), rev(2, 2, WED, **CLOSED),
+    ])
+    assert cy.items.set_index("item_id")["returns"].to_dict() == {1: 2, 2: 0}

@@ -14,16 +14,17 @@ REMOVED = "Removed"
 CALENDAR_COLUMNS = ["sprint_id", "project", "team", "team_key", "iteration", "start", "end", "cutoff"]
 SPRINT_COLUMNS = CALENDAR_COLUMNS + [
     "n_items", "committed_points", "done_points", "pct_done", "pct_done_count", "n_unestimated", "n_added_mid",
+    "done_points_strict", "pct_done_strict",
 ]
 ITEM_COLUMNS = CALENDAR_COLUMNS + [
     "item_id", "type", "state_category_at_commit", "area", "assigned_to_sk", "assigned_at_end_sk", "parent_id",
     "created", "last_changed", "revisions_so_far", "carryover_count", "raw_points", "points", "is_unestimated",
-    "done", "state_category_at_end",
+    "done", "state_category_at_end", "done_strict",
 ]
 # Items that joined a sprint after its cutoff and were still in it at the end; as of the end, not the cutoff.
 ADDED_COLUMNS = CALENDAR_COLUMNS + [
     "item_id", "type", "area", "assigned_to_sk", "carryover_count", "raw_points", "points", "is_unestimated",
-    "done", "state_category_at_end",
+    "done", "state_category_at_end", "done_strict",
 ]
 
 
@@ -33,6 +34,7 @@ class SprintData:
     items: pd.DataFrame
     report: dict = field(default_factory=dict)
     added: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=ADDED_COLUMNS))
+    close_grace_hours: float = 0.0  # done also counts items closed this long after the end, still in the sprint
 
 
 def raw_points(frame: pd.DataFrame) -> pd.Series:
@@ -144,6 +146,29 @@ def carryover(revisions: pd.DataFrame, rows: pd.DataFrame, iteration_end: pd.Ser
     return left["_row"].map(counts).fillna(0).astype("int64").to_numpy()
 
 
+def done_at_end(
+    cache: CacheData, item_ids: pd.Series, iterations: pd.Series, ends: pd.Series, projects: pd.Series,
+    done_categories, close_grace_hours: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """(done, done_strict) per row: in its iteration and in a done category at its end (strict), or also at any
+    point up to close_grace_hours after it (as far as the last extract has seen), still in that iteration."""
+    done = set(done_categories)
+    keys = pd.DataFrame({"item_id": item_ids.to_numpy(), "t": ends.to_numpy()})
+    at_e = as_of_many(cache.revisions, keys, "t")
+    strict = (at_e["iteration"].to_numpy() == iterations.to_numpy()) & at_e["state_category"].isin(done).to_numpy()
+    if close_grace_hours <= 0 or len(keys) == 0:
+        return strict, strict
+    seen = horizon(cache, projects.reset_index(drop=True))
+    until = (keys["t"] + pd.Timedelta(hours=close_grace_hours)).clip(upper=seen)
+    later = cache.revisions[["item_id", "changed", "iteration", "state_category"]].merge(
+        keys.assign(_row=np.arange(len(keys)), _it=iterations.to_numpy(), _until=until), on="item_id")
+    later = later[(later["changed"] > later["t"]) & (later["changed"] <= later["_until"])
+                  & (later["iteration"] == later["_it"]) & later["state_category"].isin(done)]
+    graced = np.zeros(len(keys), dtype=bool)
+    graced[later["_row"].unique()] = True
+    return strict | graced, strict
+
+
 def _committed(
     cache: CacheData,
     pairs: pd.DataFrame,
@@ -202,7 +227,9 @@ def summarize_sprints(items: pd.DataFrame, n_added: dict[str, int] | None = None
     if items.empty:
         return pd.DataFrame(columns=SPRINT_COLUMNS)
     done = items["done"].astype("float64")
-    work = items.assign(_done=done, _done_pts=items["points"] * done, _unest=items["is_unestimated"].astype("int64"))
+    strict = items["done_strict"].astype("float64") if "done_strict" in items else done
+    work = items.assign(_done=done, _done_pts=items["points"] * done, _strict_pts=items["points"] * strict,
+                        _unest=items["is_unestimated"].astype("int64"))
     g = work.groupby("sprint_id", sort=False)
     out = g[CALENDAR_COLUMNS[1:]].first()
     out["n_items"] = g.size()
@@ -211,6 +238,8 @@ def summarize_sprints(items: pd.DataFrame, n_added: dict[str, int] | None = None
     out["pct_done"] = out["done_points"] / out["committed_points"].where(out["committed_points"] > 0)
     out["pct_done_count"] = g["_done"].mean()
     out["n_unestimated"] = g["_unest"].sum()
+    out["done_points_strict"] = g["_strict_pts"].sum(min_count=1)
+    out["pct_done_strict"] = out["done_points_strict"] / out["committed_points"].where(out["committed_points"] > 0)
     out = out.reset_index()
     out["n_added_mid"] = out["sprint_id"].map(n_added or {}).fillna(0).astype("int64")
     return out[SPRINT_COLUMNS].sort_values(["start", "sprint_id"], kind="mergesort").reset_index(drop=True)
@@ -228,6 +257,7 @@ def build_sprints(
     work_item_types: list[str],
     done_categories: list[str] = ("Completed",),
     commit_grace_days: float = 1.0,
+    close_grace_hours: float = 0.0,
 ) -> SprintData:
     revs = cache.revisions
     cal = sprint_calendar(cache, commit_grace_days)
@@ -240,8 +270,10 @@ def build_sprints(
     c, n_unassigned = _committed(cache, pairs, at_c, assign, types, done | {REMOVED})
     e = at_e.loc[c.index]
     is_open = (c["end"] > horizon(cache, c["project"])).to_numpy()  # outcome not observed yet
-    ended_done = (e["iteration"].to_numpy() == c["iteration"].to_numpy()) & e["state_category"].isin(done).to_numpy()
+    ended_done, strict = done_at_end(
+        cache, c["item_id"], c["iteration"], c["end"], c["project"], done, close_grace_hours)
     c["done"] = np.where(is_open, np.nan, ended_done.astype("float64"))
+    c["done_strict"] = np.where(is_open, np.nan, strict.astype("float64"))
     c["state_category_at_end"] = np.where(is_open, None, e["state_category"].to_numpy())
     c["assigned_at_end_sk"] = e["assigned_to_sk"].to_numpy()
 
@@ -255,7 +287,7 @@ def build_sprints(
     )
 
     items = _finish_items(c, None) if len(c) else pd.DataFrame(columns=ITEM_COLUMNS)
-    added = _added(cache, pairs.loc[added_mask], at_e.loc[added_mask], assign, done, items)
+    added = _added(cache, pairs.loc[added_mask], at_e.loc[added_mask], assign, done, items, close_grace_hours)
     sprints = summarize_sprints(items, added["sprint_id"].value_counts().to_dict())
     report = {
         "unassigned_items": n_unassigned,
@@ -269,12 +301,12 @@ def build_sprints(
         "end_state_mix": items.loc[items["done"].notna(), "state_category_at_end"]
         .fillna("(missing)").value_counts().to_dict(),
     }
-    return SprintData(sprints, items, report, added)
+    return SprintData(sprints, items, report, added, float(close_grace_hours))
 
 
 def _added(
     cache: CacheData, pairs: pd.DataFrame, at_e: pd.DataFrame, assign: Assigner, done: set[str],
-    history_items: pd.DataFrame,
+    history_items: pd.DataFrame, close_grace_hours: float = 0.0,
 ) -> pd.DataFrame:
     """Items added after the cutoff and still in the sprint at its end, described as of the end."""
     if pairs.empty:
@@ -294,7 +326,9 @@ def _added(
     a["sprint_id"] = a["team_key"] + "|" + a["iteration"]
     a["carryover_count"] = carryover(cache.revisions, a.assign(cutoff=a["end"]), iteration_end_map(cache))
     is_open = (a["end"] > horizon(cache, a["project"])).to_numpy()
-    a["done"] = np.where(is_open, np.nan, pd.Series(state).isin(done).to_numpy().astype("float64"))
+    graced, strict = done_at_end(cache, a["item_id"], a["iteration"], a["end"], a["project"], done, close_grace_hours)
+    a["done"] = np.where(is_open, np.nan, graced.astype("float64"))
+    a["done_strict"] = np.where(is_open, np.nan, strict.astype("float64"))
     a["state_category_at_end"] = np.where(is_open, None, state)
     a = impute_points(a, history_items if len(history_items) else a)
     return a[ADDED_COLUMNS].sort_values(["start", "sprint_id", "item_id"], kind="mergesort").reset_index(drop=True)
@@ -323,7 +357,7 @@ def scope_at(
         c = c[c["team"] == team]
     if c.empty:
         return pd.DataFrame(columns=SPRINT_COLUMNS), pd.DataFrame(columns=ITEM_COLUMNS)
-    c = c.assign(done=np.nan, state_category_at_end=None, assigned_at_end_sk=None)
+    c = c.assign(done=np.nan, state_category_at_end=None, assigned_at_end_sk=None, done_strict=np.nan)
     items = _finish_items(c, history.items)
     return summarize_sprints(items), items
 
@@ -348,8 +382,11 @@ def data_report(cache: CacheData, sd: SprintData) -> dict:
         })
     mix = sd.report.get("end_state_mix", {})
     ended = mix.get("Resolved", 0) + mix.get("Completed", 0)
+    done_pts = sd.sprints["done_points"].sum()
     return {
         **sd.report,
         "projects": per_project,
         "resolved_share_of_resolved_or_completed": (mix.get("Resolved", 0) / ended) if ended else float("nan"),
+        "close_grace_hours": sd.close_grace_hours,
+        "graced_share": float(1 - sd.sprints["done_points_strict"].sum() / done_pts) if done_pts > 0 else float("nan"),
     }

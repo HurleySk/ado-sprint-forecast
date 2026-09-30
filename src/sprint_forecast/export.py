@@ -12,6 +12,7 @@ import pandas as pd
 
 from sprint_forecast.cache import CacheData
 from sprint_forecast.cycle import CYCLE_STATE_COLUMNS, build_cycle
+from sprint_forecast.flow import idle_sprints, item_fates, sprint_state_changes
 from sprint_forecast.forecast import ScoredSprint, check_bundle, score_iteration
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.sprints import SPRINT_COLUMNS, build_sprints, sprint_calendar
@@ -37,17 +38,17 @@ RISK_FACTOR_COLUMNS = [f"risk_factor_{k}" for k in range(1, N_RISK_FACTORS + 1)]
 ITEM_FORECAST_COLUMNS = [
     "run_id", "forecast_key", "sprint_id", "item_id", "type", "state_category_at_commit", "points",
     "is_unestimated", "carryover_count", "p_done", *RISK_FACTOR_COLUMNS,
-    "state_category_now", "in_sprint_now", "done_now", "is_added",
+    "state_category_now", "in_sprint_now", "done_now", "is_added", "idle_sprints",
 ]
 ITEM_HISTORY_COLUMNS = [
     "sprint_id", "item_id", "type", "points", "is_unestimated", "carryover_count", "added_mid", "assignee", "done",
-    "state_category_at_end",
+    "state_category_at_end", "done_strict", "fate", "state_changes",
 ]
 CYCLE_FILE = "cycle.csv"
 CYCLE_STATES_FILE = "cycle_states.csv"
 CYCLE_FILE_COLUMNS = [
     "item_id", "project", "team", "team_key", "type", "iteration", "assignee",
-    "points_at_start", "points", "re_estimated", "started", "closed", "days",
+    "points_at_start", "points", "re_estimated", "started", "closed", "days", "returns",
 ]
 UNKNOWN_USER = "Unknown user"
 
@@ -113,9 +114,13 @@ def assignee_names(keys: pd.Series, users: pd.DataFrame) -> pd.Series:
     return names.astype(object).where(names.notna(), None)
 
 
-def item_history(history, users: pd.DataFrame) -> pd.DataFrame:
+def item_history(cache: CacheData, history, done_categories) -> pd.DataFrame:
     """Every item in a reconstructed sprint: committed at the cutoff, or added after it and still there at the end
-    (added_mid). Each with who held it at the sprint's end and whether it was done by then (empty until it ends)."""
+    (added_mid). Each with who held it at the sprint's end, whether it was done by then (done_strict: without the
+    close grace), where it went (flow.FATES; all three empty until the sprint ends) and its state changes in the
+    sprint."""
+    users = cache.users
+
     def rows(items: pd.DataFrame, holder: str, added: bool) -> pd.DataFrame:
         return pd.DataFrame({
             "start": items["start"],
@@ -129,9 +134,13 @@ def item_history(history, users: pd.DataFrame) -> pd.DataFrame:
             "assignee": assignee_names(items[holder], users),
             "done": items["done"].astype("float64"),
             "state_category_at_end": items["state_category_at_end"],
+            "done_strict": items["done_strict"].astype("float64"),
+            "state_changes": sprint_state_changes(cache, items).astype("int64"),
         })
     frames = [rows(history.items, "assigned_at_end_sk", False), rows(history.added, "assigned_to_sk", True)]
     out = pd.concat([f for f in frames if len(f)], ignore_index=True) if any(len(f) for f in frames) else frames[0]
+    fates = item_fates(cache, history, done_categories)
+    out = out.merge(fates.astype({"item_id": "int64"}), on=["sprint_id", "item_id"], how="left")
     out = out.sort_values(["start", "sprint_id", "added_mid", "item_id"], kind="mergesort")
     return out[ITEM_HISTORY_COLUMNS].reset_index(drop=True)
 
@@ -147,7 +156,7 @@ def cycle_files(cache: CacheData, users: pd.DataFrame, settings: dict) -> tuple[
     return items[CYCLE_FILE_COLUMNS], cy.states[CYCLE_STATE_COLUMNS]
 
 
-def _item_frame(items, *, points, p_done, is_added, factors, progress, run_id, key) -> pd.DataFrame:
+def _item_frame(items, *, points, p_done, is_added, factors, progress, idle, run_id, key) -> pd.DataFrame:
     frame = pd.DataFrame({
         "run_id": run_id,
         "forecast_key": key,
@@ -160,6 +169,7 @@ def _item_frame(items, *, points, p_done, is_added, factors, progress, run_id, k
         "carryover_count": items["carryover_count"].astype("int64"),
         "p_done": p_done,
         "is_added": is_added,
+        "idle_sprints": idle,
     }, index=items.index)
     for k, col in enumerate(RISK_FACTOR_COLUMNS):
         frame[col] = [f[k] if k < len(f) else None for f in factors]
@@ -183,6 +193,7 @@ def _item_rows(fc, scored: ScoredSprint, cache: CacheData, done_categories, run_
             is_added=added,
             factors=[describe_drivers(contrib.loc[i], rows.loc[i], k=N_RISK_FACTORS) for i in rows.index],
             progress=progress_at(cache, rows, scored.t, done_categories),
+            idle=idle_sprints(cache, rows.assign(t=scored.t)).astype("Int64"),
             run_id=run_id, key=key,
         ))
     if len(closed):
@@ -194,6 +205,7 @@ def _item_rows(fc, scored: ScoredSprint, cache: CacheData, done_categories, run_
             is_added=pd.Series(False, index=closed.index),
             factors=[[] for _ in closed.index],
             progress=progress,
+            idle=pd.Series(pd.NA, index=closed.index, dtype="Int64"),
             run_id=run_id, key=key,
         ))
     if not parts:
@@ -239,7 +251,7 @@ def export_forecasts(
     fc = bundle["forecaster"]
     settings = {k: bundle[k] for k in ("work_item_types", "done_categories", "commit_grace_days")}
     trained_at = to_utc(bundle["trained_at"]) if bundle.get("trained_at") else pd.NaT
-    history = build_sprints(cache, **settings)
+    history = build_sprints(cache, **settings, close_grace_hours=bundle.get("close_grace_hours", 0.0))
     chosen = select_sprints(sprint_calendar(cache, settings["commit_grace_days"]), now)
     sprint_rows, item_frames = [], []
     for iteration, group in chosen.groupby("iteration", sort=False):
@@ -268,7 +280,7 @@ def export_forecasts(
         write_csv(sprints, out / SPRINT_FORECASTS_DIR / f"{run_id}.csv"),
         write_csv(items, out / ITEM_FORECASTS_DIR / f"{run_id}.csv"),
         write_csv(history.sprints[SPRINT_COLUMNS], out / SPRINTS_FILE),
-        write_csv(item_history(history, cache.users), out / ITEM_HISTORY_FILE),
+        write_csv(item_history(cache, history, settings["done_categories"]), out / ITEM_HISTORY_FILE),
     ]
     cycle, cycle_states = cycle_files(cache, cache.users, settings)
     files += [write_csv(cycle, out / CYCLE_FILE), write_csv(cycle_states, out / CYCLE_STATES_FILE)]

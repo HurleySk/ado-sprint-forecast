@@ -292,3 +292,22 @@ def test_export_lists_each_forecast(workspace, tmp_path, capsys):
 def test_export_without_a_model_explains(tmp_path):
     result = CliRunner().invoke(cli.main, ["--root", str(tmp_path), "export"])
     assert result.exit_code != 0 and "sprint-forecast train" in result.output
+
+
+def test_train_and_data_use_the_close_grace_and_title_exclusion_from_config(tmp_path, monkeypatch):
+    from sprint_forecast.config import Config, config_path, save_config
+    generate(tmp_path / ".sprint-forecast" / "cache.db", seed=5, n_sprints=8)
+    save_config(Config(org_url="https://dev.azure.com/contoso", projects=["Alpha"], close_grace_hours=12.0,
+                       exclude_title_pattern="tracker"), config_path(tmp_path))
+    assert run(tmp_path, "train").exit_code == 0
+    bundle = joblib.load(tmp_path / ".sprint-forecast" / "model.joblib")
+    assert bundle["close_grace_hours"] == 12.0
+    result = run(tmp_path, "data")
+    assert "Done also counts items closed up to 12 hours after the end" in result.output
+    assert "Items left out by title: 0" in result.output
+
+    monkeypatch.setenv("ADO_PAT", "not-a-real-token")
+    calls = []
+    monkeypatch.setattr(cli, "make_fetch_json", lambda method, pat: lambda url: calls.append(url) or {"value": []})
+    assert run(tmp_path, "extract").exit_code == 0
+    assert any("/WorkItems?" in u for u in calls)

@@ -50,6 +50,7 @@ class Settings:
     work_item_types: list[str]
     done_categories: list[str]
     commit_grace_days: float = 1.0
+    close_grace_hours: float = 0.0
 
 
 def _settings(root: Path, done_categories: str | None) -> Settings:
@@ -63,6 +64,7 @@ def _settings(root: Path, done_categories: str | None) -> Settings:
         work_item_types=cfg.work_item_types if cfg else list(DEFAULT_TYPES),
         done_categories=done or (cfg.done_categories if cfg else list(DEFAULT_DONE)),
         commit_grace_days=cfg.commit_grace_days if cfg else 1.0,
+        close_grace_hours=cfg.close_grace_hours if cfg else 0.0,
     )
 
 
@@ -87,7 +89,7 @@ def _load_cache(workdir: Path) -> CacheData:
 def _build(cache: CacheData, s: Settings) -> SprintData:
     return build_sprints(
         cache, work_item_types=s.work_item_types, done_categories=s.done_categories,
-        commit_grace_days=s.commit_grace_days,
+        commit_grace_days=s.commit_grace_days, close_grace_hours=s.close_grace_hours,
     )
 
 
@@ -100,6 +102,7 @@ def _pct(x: float) -> str:
 
 
 def format_data_report(report: dict) -> str:
+    grace = report.get("close_grace_hours", 0.0)
     lines = ["Projects"]
     for p in report["projects"]:
         fallback = "  (project-level sprints: no team subscribes to dated iterations)" if p["fallback"] else ""
@@ -119,13 +122,21 @@ def format_data_report(report: dict) -> str:
         + (", ".join(f"{k} {v}" for k, v in sorted(report["end_state_mix"].items())) or "n/a"),
         f"Resolved share of Resolved+Completed at end: {_pct(report['resolved_share_of_resolved_or_completed'])}"
         " (high values suggest --done-categories Resolved,Completed)",
+        f"Items left out by title: {report.get('excluded_items', 0)}",
     ]
+    if grace > 0:
+        lines.append(
+            f"Done also counts items closed up to {grace:g} hours after the end while still in the sprint: "
+            f"{_pct(report.get('graced_share', float('nan')))} of done committed points"
+        )
     return "\n".join(lines)
 
 
 def _data(workdir: Path, s: Settings) -> None:
     cache = _load_cache(workdir)
-    click.echo(format_data_report(data_report(cache, _build(cache, s))))
+    report = data_report(cache, _build(cache, s))
+    report["excluded_items"] = len(cache.excluded_items)
+    click.echo(format_data_report(report))
 
 
 def _backtest(workdir: Path, s: Settings, **kwargs) -> None:
@@ -154,6 +165,7 @@ def _train(workdir: Path, s: Settings) -> dict:
         "work_item_types": s.work_item_types,
         "done_categories": s.done_categories,
         "commit_grace_days": s.commit_grace_days,
+        "close_grace_hours": s.close_grace_hours,
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_sprints": int(len(sd.sprints)),
         "n_items": int(len(known.drop_duplicates(["sprint_id", "item_id"]))),
@@ -213,7 +225,8 @@ def _predict(
 ) -> list[dict]:
     bundle = _load_model(workdir)
     fc = bundle["forecaster"]
-    s = Settings(bundle["work_item_types"], bundle["done_categories"], bundle["commit_grace_days"])
+    s = Settings(bundle["work_item_types"], bundle["done_categories"], bundle["commit_grace_days"],
+                 bundle.get("close_grace_hours", 0.0))
     cache = _load_cache(workdir)
     history = _build(cache, s)
     cal = sprint_calendar(cache, s.commit_grace_days)
@@ -365,7 +378,8 @@ def extract(root: Path, projects: tuple[str, ...], full: bool) -> None:
     try:
         results = extract_all(
             fetch_json, conn, cfg.org_url, list(projects) or cfg.projects,
-            work_item_types=cfg.work_item_types, full=full, echo=click.echo,
+            work_item_types=cfg.work_item_types, full=full, exclude_title_pattern=cfg.exclude_title_pattern,
+            echo=click.echo,
         )
     except PROJECT_ERRORS as e:
         raise click.ClickException(f"cannot list projects: {describe_error(e)}") from None

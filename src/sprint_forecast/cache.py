@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS team_areas (team_sk TEXT NOT NULL, area_path TEXT NOT
 CREATE TABLE IF NOT EXISTS team_iterations (team_sk TEXT NOT NULL, iteration_path TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (user_sk TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS excluded_items (item_id INTEGER PRIMARY KEY, project TEXT NOT NULL);
 """
 
 
@@ -53,6 +54,7 @@ class CacheData:
     team_iterations: pd.DataFrame
     extracted_at: dict[str, pd.Timestamp] = field(default_factory=dict)  # project -> when its data was pulled
     users: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["user_sk", "name"]))  # display names
+    excluded_items: set[int] = field(default_factory=set)  # left out by title (their revisions are not loaded)
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -137,6 +139,14 @@ def replace_project_teams(
     )
 
 
+def replace_project_exclusions(conn: sqlite3.Connection, project: str, item_ids: Iterable[int]) -> None:
+    """The project's items to leave out (matched by title at extract; the titles are not kept)."""
+    conn.execute("DELETE FROM excluded_items WHERE project = ?", (project,))
+    conn.executemany(
+        "INSERT OR REPLACE INTO excluded_items(item_id, project) VALUES (?, ?)", ((int(i), project) for i in item_ids)
+    )
+
+
 def upsert_users(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
     """Store Analytics user keys with their display names; a known key takes the newest name."""
     cur = conn.executemany(
@@ -172,6 +182,9 @@ def load_cache(conn: sqlite3.Connection, projects: list[str] | None = None) -> C
         where = f" WHERE project IN ({','.join('?' for _ in projects)})"
         params = tuple(projects)
     revs = pd.read_sql_query(f"SELECT * FROM revisions{where}", conn, params=params)
+    excluded = set(pd.read_sql_query(f"SELECT item_id FROM excluded_items{where}", conn, params=params)["item_id"])
+    excluded = {int(i) for i in excluded}
+    revs = revs[~revs["item_id"].isin(excluded)]
     for col in ("changed", "revised", "created"):
         revs[col] = _ts(revs[col])
     for col in ("story_points", "effort", "parent_id"):
@@ -196,4 +209,4 @@ def load_cache(conn: sqlite3.Connection, projects: list[str] | None = None) -> C
     if projects:
         extracted = {p: t for p, t in extracted.items() if p in projects}
     users = pd.read_sql_query("SELECT user_sk, name FROM users", conn)
-    return CacheData(revs, its, teams, team_areas, team_iterations, extracted, users)
+    return CacheData(revs, its, teams, team_areas, team_iterations, extracted, users, excluded)

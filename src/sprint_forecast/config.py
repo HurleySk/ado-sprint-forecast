@@ -28,6 +28,8 @@ class Config:
     work_item_types: list[str] = field(default_factory=lambda: list(DEFAULT_TYPES))
     done_categories: list[str] = field(default_factory=lambda: list(DEFAULT_DONE))
     commit_grace_days: float = 1.0
+    close_grace_hours: float = 0.0  # count items closed this long after the sprint's end, still in it, as done
+    exclude_title_pattern: str = ""  # regex (case-insensitive); items whose title matches are left out entirely
 
 
 def data_dir(root: Path) -> Path:
@@ -58,6 +60,11 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
     ado = raw.get("ado", {})
     model = raw.get("model", {})
     auth = ado.get("auth", "pat")
+    pattern = str(model.get("exclude_title_pattern", ""))
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"model.exclude_title_pattern is not a valid regular expression: {e}") from None
     if auth not in AUTH_METHODS:
         raise ValueError(f"ado.auth must be one of {AUTH_METHODS}, got {auth!r}")
     return Config(
@@ -68,6 +75,8 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
         work_item_types=list(model.get("work_item_types", DEFAULT_TYPES)),
         done_categories=list(model.get("done_categories", DEFAULT_DONE)),
         commit_grace_days=float(model.get("commit_grace_days", 1.0)),
+        close_grace_hours=float(model.get("close_grace_hours", 0.0)),
+        exclude_title_pattern=pattern,
     )
 
 
@@ -81,6 +90,8 @@ def save_config(cfg: Config, path: Path) -> None:
             "work_item_types": cfg.work_item_types,
             "done_categories": cfg.done_categories,
             "commit_grace_days": float(cfg.commit_grace_days),
+            "close_grace_hours": float(cfg.close_grace_hours),
+            "exclude_title_pattern": cfg.exclude_title_pattern,
         },
     }
     path = Path(path)

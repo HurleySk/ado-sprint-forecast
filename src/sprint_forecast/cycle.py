@@ -12,7 +12,7 @@ from sprint_forecast.sprints import match_team, raw_points, sprint_calendar
 ACTIVE_CATEGORIES = ("InProgress", "Resolved")
 CYCLE_COLUMNS = [
     "item_id", "project", "team", "team_key", "type", "iteration", "assigned_to_sk",
-    "points_at_start", "points", "re_estimated", "started", "closed", "days",
+    "points_at_start", "points", "re_estimated", "started", "closed", "days", "returns",
 ]
 CYCLE_STATE_COLUMNS = ["item_id", "state", "state_category", "days"]
 
@@ -102,6 +102,10 @@ def build_cycle(cache: CacheData, *, work_item_types: list[str], done_categories
     seg["until"] = seg.groupby("item_id")["changed"].shift(-1)
     seg = seg[seg["until"].notna()]
     seg["days"] = business_days(seg["changed"], seg["until"]) if len(seg) else pd.Series(dtype="float64")
+    # returns: moves into a state the item had already left, between start and done (rework)
+    moves = seg[seg["state"].fillna("") != seg.groupby("item_id")["state"].shift().fillna("")]
+    seen_before = moves.duplicated(["item_id", "state"])
+    items["returns"] = items["item_id"].map(moves[seen_before].groupby("item_id").size()).fillna(0).astype("int64")
     states = (seg.groupby(["item_id", "state", "state_category"], sort=False, dropna=False)["days"].sum()
               .reset_index().sort_values(["item_id", "state"], kind="mergesort"))
     return CycleData(items[CYCLE_COLUMNS].reset_index(drop=True), states[CYCLE_STATE_COLUMNS].reset_index(drop=True))

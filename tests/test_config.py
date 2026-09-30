@@ -55,3 +55,22 @@ def test_parse_done_categories():
         parse_done_categories("Done")
     with pytest.raises(ValueError):
         parse_done_categories("Removed")
+
+
+def test_round_trip_keeps_close_grace_and_title_exclusion(tmp_path):
+    cfg = Config(org_url="https://dev.azure.com/contoso", projects=["Alpha"], close_grace_hours=12.0,
+                 exclude_title_pattern=r"placeholder|^tracker\b")
+    path = config_path(tmp_path)
+    save_config(cfg, path)
+    assert load_config(path, env={}) == cfg
+    assert Config(org_url="x", projects=["A"]).close_grace_hours == 0.0
+    assert Config(org_url="x", projects=["A"]).exclude_title_pattern == ""
+
+
+def test_bad_title_pattern_rejected(tmp_path):
+    path = config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('[ado]\norg_url = "x"\nprojects = ["A"]\n[model]\nexclude_title_pattern = "(unclosed"\n',
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="exclude_title_pattern"):
+        load_config(path, env={})

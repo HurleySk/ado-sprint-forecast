@@ -15,6 +15,7 @@ from sprint_forecast.sprints import (
     Assigner,
     SprintData,
     carryover,
+    done_at_end,
     horizon,
     impute_points,
     iteration_end_map,
@@ -162,9 +163,9 @@ def open_rows(
     done_points = done_points_at(cache, scope, t_by_sprint, done_categories)
     rows["done_points_at_t"] = rows["sprint_id"].map(done_points).fillna(0.0).where(after, 0.0)
 
-    at_end = as_of_many(revs, pd.DataFrame({"item_id": rows["item_id"], "end": rows["end"]}), "end")
-    ended_done = (at_end["iteration"] == rows["iteration"]) & at_end["state_category"].isin(done)
-    rows["y"] = ended_done.astype("float64").where(rows["end"] <= horizon(cache, rows["project"]))
+    ended_done, _ = done_at_end(
+        cache, rows["item_id"], rows["iteration"], rows["end"], rows["project"], done, sd.close_grace_hours)
+    rows["y"] = pd.Series(ended_done, dtype="float64").where(rows["end"] <= horizon(cache, rows["project"]))
     out = rows[OPEN_ROW_COLUMNS].sort_values(["start", "sprint_id", "item_id"], kind="mergesort")
     return out.reset_index(drop=True)
 

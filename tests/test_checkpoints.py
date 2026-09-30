@@ -184,3 +184,18 @@ def test_state_changes_keep_the_first_revision_and_each_change_of_state():
     assert list(zip(ev["item_id"], ev["changed"].dt.day, ev["first"])) == [
         (1, 1, True), (1, 3, False), (1, 4, False), (2, 1, True),
     ]
+
+
+def test_y_counts_a_close_within_the_sprint_data_close_grace(tmp_path):
+    revs = [
+        rev(1, 1, PRE, iteration=IT1),
+        rev(1, 2, "2024-03-18T11:00:00.000Z", iteration=IT1, state="Closed", state_category="Completed"),
+    ]
+    cache = build_cache(tmp_path, revs, [S0, S1, S2], [RED])
+    cal = sprint_calendar(cache)
+    s = cal[cal["sprint_id"] == SPRINT1]
+    for grace, y in ((0.0, 0.0), (12.0, 1.0)):
+        sd = build_sprints(cache, work_item_types=TYPES, done_categories=DONE, close_grace_hours=grace)
+        rows = open_rows(cache, sd, s, pd.Series(pd.Timestamp(T), index=s.index), work_item_types=TYPES,
+                         done_categories=DONE)
+        assert rows["y"].tolist() == [y]

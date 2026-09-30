@@ -262,3 +262,18 @@ def test_export_with_nothing_running_still_writes_headers(synth16, bundle, tmp_p
     assert not (tmp_path / "backtest.csv").exists()
     assert list(pd.read_csv(tmp_path / "items.csv").columns) == ITEM_HISTORY_COLUMNS
     assert list(pd.read_csv(tmp_path / "cycle.csv").columns) == CYCLE_FILE_COLUMNS
+
+
+def test_export_items_say_where_missed_work_went_and_how_it_moved(exported):
+    from sprint_forecast.flow import FATES
+    out, first, _ = exported
+    items = pd.read_csv(out / "items.csv")
+    ended = items[items["done"].notna()]
+    assert ended["fate"].isin(FATES).all() and ended["fate"].nunique() >= 3
+    assert ((ended["fate"] == "done") == (ended["done_strict"] == 1)).all()
+    assert items.loc[items["done"].isna(), "fate"].isna().all()
+    assert (items["state_changes"] >= 0).all() and (items["state_changes"] == 0).any()
+    forecasts = pd.read_csv(out / "item_forecasts" / f"{first.run_id}.csv")
+    open_rows = forecasts[forecasts["risk_factor_1"].notna()]
+    assert (open_rows["idle_sprints"] >= 0).all() and open_rows["idle_sprints"].max() >= 1
+    assert (pd.read_csv(out / "cycle.csv")["returns"] >= 0).all()

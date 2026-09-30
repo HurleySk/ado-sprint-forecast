@@ -361,3 +361,58 @@ def test_iteration_group_filters_to_a_team_and_explains_bad_input(tmp_path):
         iteration_group(cal, "Alpha\\Nope")
     with pytest.raises(ValueError, match="does not run"):
         iteration_group(cal, "Alpha\\Sprint 1", "Team Pink")
+
+
+END1 = "2024-03-18T04:59:59.999Z"  # Sprint 1's end
+NEXT_MORNING = "2024-03-18T11:00:00.000Z"  # 6 hours after it
+NEXT_EVENING = "2024-03-18T18:00:00.000Z"  # 13 hours after it
+CLOSED = {"state": "Closed", "state_category": "Completed"}
+
+
+def build_graced(tmp_path, revisions, grace=12.0, meta=None):
+    cache = build_cache(tmp_path, revisions, [S0, S1, S2, UNDATED], [RED], meta=meta)
+    return build_sprints(cache, work_item_types=TYPES, close_grace_hours=grace)
+
+
+def test_close_grace_counts_items_closed_just_after_the_end_while_still_in_the_sprint(tmp_path):
+    it = "Alpha\Sprint 1"
+    sd = build_graced(tmp_path, [
+        rev(1, 1, PLAN, iteration=it), rev(1, 2, NEXT_MORNING, iteration=it, **CLOSED),
+        rev(2, 1, PLAN, iteration=it), rev(2, 2, NEXT_EVENING, iteration=it, **CLOSED),
+        rev(3, 1, PLAN, iteration=it), rev(3, 2, "2024-03-18T08:00:00.000Z", iteration="Alpha\Sprint 2"),
+        rev(3, 3, NEXT_MORNING, iteration="Alpha\Sprint 2", **CLOSED),
+        rev(4, 1, PLAN, iteration=it), rev(4, 2, MID, iteration=it, **CLOSED),
+    ])
+    items = items_of(sd)
+    assert items["done"].to_dict() == {1: 1.0, 2: 0.0, 3: 0.0, 4: 1.0}
+    assert items["done_strict"].to_dict() == {1: 0.0, 2: 0.0, 3: 0.0, 4: 1.0}
+    s = sd.sprints.set_index("sprint_id").loc[SPRINT1]
+    assert s["pct_done"] == 0.5 and s["pct_done_strict"] == 0.25
+    assert s["done_points"] == 6.0 and s["done_points_strict"] == 3.0
+    assert sd.close_grace_hours == 12.0
+
+
+def test_no_close_grace_by_default(tmp_path):
+    it = "Alpha\Sprint 1"
+    cache = build_cache(tmp_path, [rev(1, 1, PLAN, iteration=it), rev(1, 2, NEXT_MORNING, iteration=it, **CLOSED)],
+                        [S0, S1, S2, UNDATED], [RED])
+    sd = build_sprints(cache, work_item_types=TYPES)
+    assert items_of(sd).loc[1, "done"] == 0.0
+    assert sd.close_grace_hours == 0.0
+
+
+def test_close_grace_applies_to_items_added_after_the_cutoff(tmp_path):
+    it = "Alpha\Sprint 1"
+    sd = build_graced(tmp_path, [
+        rev(1, 1, PLAN, iteration=it),
+        rev(2, 1, PRE), rev(2, 2, MID, iteration=it), rev(2, 3, NEXT_MORNING, iteration=it, **CLOSED),
+    ])
+    added = sd.added.set_index("item_id")
+    assert added.loc[2, "done"] == 1.0 and added.loc[2, "done_strict"] == 0.0
+
+
+def test_close_grace_counts_only_closes_seen_by_the_last_extract(tmp_path):
+    it = "Alpha\Sprint 1"
+    revs = [rev(1, 1, PLAN, iteration=it), rev(1, 2, NEXT_MORNING, iteration=it, **CLOSED)]
+    sd = build_graced(tmp_path, revs, meta={"extracted_at:Alpha": "2024-03-18T08:00:00.000Z"})
+    assert items_of(sd).loc[1, "done"] == 0.0  # ended, but the close came after the extract
