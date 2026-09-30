@@ -104,14 +104,16 @@ def golive(
     kids["parent_id"] = kids["parent_id"].astype("int64")
     kids["is_done"] = kids["state_category"].isin(done)
     theirs = revs[revs["item_id"].isin(kids["item_id"])].sort_values(["changed", "rev"], kind="mergesort")
-    first_done = theirs[theirs["state_category"].isin(done)].groupby("item_id").head(1).set_index("item_id")
+    in_done = theirs["state_category"].isin(done)
+    entered = in_done & ~in_done.groupby(theirs["item_id"]).shift(fill_value=False)
+    last_done = theirs[entered].groupby("item_id").tail(1).set_index("item_id")  # a reopened child: its last close
     def per_kid(values: pd.Series) -> pd.Series:
         return values.reindex(kids["item_id"]).set_axis(kids.index)
 
-    kids["done_at"] = per_kid(first_done["changed"]).where(kids["is_done"])
+    kids["done_at"] = per_kid(last_done["changed"]).where(kids["is_done"])
     started = theirs[theirs["state_category"].isin(set(ACTIVE_CATEGORIES) | done)].groupby("item_id")["changed"].min()
     kids["started"] = per_kid(started)
-    kids["raw_points"] = raw_points(kids).where(~kids["is_done"], per_kid(raw_points(first_done)))
+    kids["raw_points"] = raw_points(kids).where(~kids["is_done"], per_kid(raw_points(last_done)))
     kids["raw_points"] = kids["raw_points"].fillna(raw_points(kids))
     team = _teams(cache, kids)
     kids["team_key"] = (kids["project"] + "/" + team).where(team.notna())

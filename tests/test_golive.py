@@ -134,6 +134,28 @@ def test_the_parent_team_holds_most_of_the_open_points(tmp_path):
     assert teams[700] == "Alpha/Team Red"  # no open child has a team: all children decide
 
 
+def reclosed(item_id: int, parent: int) -> list[dict]:
+    """Closed in Sprint 1 with 5 points, reopened in Sprint 3 and closed again there with 8."""
+    return [
+        rev(item_id, 1, day(1, 0), parent_id=parent, iteration=PATHS[1], story_points=5.0),
+        rev(item_id, 2, day(1, 2), parent_id=parent, iteration=PATHS[1], story_points=5.0, **ACTIVE),
+        rev(item_id, 3, day(1, 5), parent_id=parent, iteration=PATHS[1], story_points=5.0, **CLOSED),
+        rev(item_id, 4, day(3, 1), parent_id=parent, iteration=PATHS[3], story_points=8.0, **ACTIVE),
+        rev(item_id, 5, day(3, 5), parent_id=parent, iteration=PATHS[3], story_points=8.0, **CLOSED),
+    ]
+
+
+def test_a_reclosed_child_burns_when_and_as_it_was_last_closed(tmp_path):
+    parents, _ = run(tmp_path, finished(1, 1, 100) + finished(2, 2, 100) + reclosed(3, 100) + [
+        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+    ])
+    p = parents.set_index("parent_id").loc[100]
+    assert (p["done_points"], p["burn_sprints"], p["mean_burn"]) == (18.0, 3, 6.0)
+    parents, _ = run(tmp_path / "b", reclosed(10, 400) + [rev(11, 1, day(3, 1), parent_id=400, iteration=BACKLOG)],
+                     active_days=30)
+    assert parents["parent_id"].tolist() == [400]
+
+
 def test_removed_children_drop_out_and_unestimated_ones_take_the_team_median(tmp_path):
     parents, _ = run(tmp_path, STEADY + [
         rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=None),
