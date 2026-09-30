@@ -51,7 +51,8 @@ exclude_title_pattern = "placeholder|^tracking item"   # regex, case-insensitive
 
 `close_grace_hours` is for teams that close the last items the morning after a sprint ends. Those items count as done
 for training, outcomes and exports, and `sprints.csv` and `items.csv` keep the strict numbers beside them
-(`pct_done_strict`, `done_strict`). The data report shows how much of the done work the grace added.
+(`pct_done_strict`, `done_strict`). A sprint has no outcome, strict or not, until the last extract is past its end
+plus the grace. The data report shows how much of the done work the grace added.
 `exclude_title_pattern` leaves out placeholder items (a standing "tracker" story, say) from everything. `extract`
 matches titles against it and stores only the IDs of the items that match, never the titles. Change it and run
 `extract` again, then `train`.
@@ -125,7 +126,8 @@ with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI re
   path matches exactly, else by longest prefix, else the only subscribed team; otherwise they are
   reported as unassigned. Committed scope is what sits in the iteration at start + 1 day (the commit
   cutoff); an item is done if at the end date it is still in the iteration and in a done category.
-  Sprints that had not ended when the data was extracted have no outcome yet and are never trained on.
+  Sprints that had not ended, close grace included, when the data was extracted have no outcome yet and are never
+  trained on.
 - **Features** describe an item open in the sprint at a time t: its type, size, state, days in that state,
   state changes this sprint, age, edits and carry-overs, whether it was added after day 1 or reassigned since,
   the sprint's day-1 plan (load vs velocity, bug, carry-over and unestimated shares, the team's recent

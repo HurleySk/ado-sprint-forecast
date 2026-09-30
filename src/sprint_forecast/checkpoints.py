@@ -16,11 +16,11 @@ from sprint_forecast.sprints import (
     SprintData,
     carryover,
     done_at_end,
-    horizon,
     impute_points,
     iteration_end_map,
     pairs_for,
     raw_points,
+    settled,
     sprint_calendar,
 )
 from sprint_forecast.timeline import as_of_many
@@ -100,9 +100,9 @@ def open_rows(
 ) -> pd.DataFrame:
     """Items open in each sprint row at its own t (`t` index-aligned with `sprints`, one row per sprint_id), with
     their state as of t, commit-time state and points (NaN for items added after the cutoff), the sprint's committed
-    points and the committed points done by t, and y: in the iteration and done at the sprint's end (NaN while the
-    sprint is open). Before a sprint's cutoff its open items are its committed scope. Past the cutoff, sprints with
-    no committed scope in `sd` are dropped."""
+    points and the committed points done by t, and y: in the iteration and done at the sprint's end (NaN until the
+    last extract is past the end and the close grace). Before a sprint's cutoff its open items are its committed
+    scope. Past the cutoff, sprints with no committed scope in `sd` are dropped."""
     if sprints["sprint_id"].duplicated().any():
         raise ValueError("open_rows needs one row per sprint")
     empty = pd.DataFrame(columns=OPEN_ROW_COLUMNS)
@@ -166,7 +166,8 @@ def open_rows(
 
     ended_done, _ = done_at_end(
         cache, rows["item_id"], rows["iteration"], rows["end"], rows["project"], done, sd.close_grace_hours)
-    rows["y"] = pd.Series(ended_done, dtype="float64").where(rows["end"] <= horizon(cache, rows["project"]))
+    rows["y"] = pd.Series(ended_done, dtype="float64").where(
+        settled(cache, rows["end"], rows["project"], sd.close_grace_hours))
     out = rows[OPEN_ROW_COLUMNS].sort_values(["start", "sprint_id", "item_id"], kind="mergesort")
     return out.reset_index(drop=True)
 

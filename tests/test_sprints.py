@@ -411,8 +411,15 @@ def test_close_grace_applies_to_items_added_after_the_cutoff(tmp_path):
     assert added.loc[2, "done"] == 1.0 and added.loc[2, "done_strict"] == 0.0
 
 
-def test_close_grace_counts_only_closes_seen_by_the_last_extract(tmp_path):
+def test_a_sprint_stays_open_until_the_last_extract_is_past_its_close_grace(tmp_path):
     it = "Alpha\Sprint 1"
-    revs = [rev(1, 1, PLAN, iteration=it), rev(1, 2, NEXT_MORNING, iteration=it, **CLOSED)]
-    sd = build_graced(tmp_path, revs, meta={"extracted_at:Alpha": "2024-03-18T08:00:00.000Z"})
-    assert items_of(sd).loc[1, "done"] == 0.0  # ended, but the close came after the extract
+    revs = [
+        rev(1, 1, PLAN, iteration=it), rev(1, 2, NEXT_MORNING, iteration=it, **CLOSED),
+        rev(2, 1, PRE), rev(2, 2, MID, iteration=it),
+    ]
+    sd = build_graced(tmp_path, revs, meta={"extracted_at:Alpha": "2024-03-18T08:00:00.000Z"})  # ended, grace running
+    assert items_of(sd)[["done", "done_strict"]].isna().all().all()
+    assert sd.added.set_index("item_id").loc[2, ["done", "done_strict"]].isna().all()
+    assert math.isnan(sd.sprints.set_index("sprint_id").loc[SPRINT1, "pct_done"])
+    sd = build_graced(tmp_path / "b", revs, meta={"extracted_at:Alpha": NEXT_EVENING})
+    assert (items_of(sd).loc[1, "done"], items_of(sd).loc[1, "done_strict"]) == (1.0, 0.0)

@@ -126,6 +126,12 @@ def horizon(cache: CacheData, projects: pd.Series) -> pd.Series:
     return pd.Series([cache.extracted_at.get(p, now) for p in projects], index=projects.index, dtype="datetime64[ns, UTC]")
 
 
+def settled(cache: CacheData, ends: pd.Series, projects: pd.Series, close_grace_hours: float = 0.0) -> np.ndarray:
+    """Whether each row's outcome is final: its end, and the close grace after it, came before the project's last
+    extract. Until then a close within the grace could still count, so the outcome stays unknown."""
+    return (ends + pd.Timedelta(hours=close_grace_hours) <= horizon(cache, projects)).to_numpy()
+
+
 def pairs_for(revisions: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
     """(item_id, target) for every item ever in a window's iteration, joined to the window's dates."""
     seen = revisions.loc[revisions["iteration"].isin(windows["target"]), ["item_id", "iteration"]]
@@ -269,7 +275,7 @@ def build_sprints(
     at_e = as_of_many(revs, pairs[["item_id", "end"]], "end")
     c, n_unassigned = _committed(cache, pairs, at_c, assign, types, done | {REMOVED})
     e = at_e.loc[c.index]
-    is_open = (c["end"] > horizon(cache, c["project"])).to_numpy()  # outcome not observed yet
+    is_open = ~settled(cache, c["end"], c["project"], close_grace_hours)  # outcome not final yet
     ended_done, strict = done_at_end(
         cache, c["item_id"], c["iteration"], c["end"], c["project"], done, close_grace_hours)
     c["done"] = np.where(is_open, np.nan, ended_done.astype("float64"))
@@ -325,7 +331,7 @@ def _added(
     a["team_key"] = a["project"] + "/" + a["team"]
     a["sprint_id"] = a["team_key"] + "|" + a["iteration"]
     a["carryover_count"] = carryover(cache.revisions, a.assign(cutoff=a["end"]), iteration_end_map(cache))
-    is_open = (a["end"] > horizon(cache, a["project"])).to_numpy()
+    is_open = ~settled(cache, a["end"], a["project"], close_grace_hours)
     graced, strict = done_at_end(cache, a["item_id"], a["iteration"], a["end"], a["project"], done, close_grace_hours)
     a["done"] = np.where(is_open, np.nan, graced.astype("float64"))
     a["done_strict"] = np.where(is_open, np.nan, strict.astype("float64"))
