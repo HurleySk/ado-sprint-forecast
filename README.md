@@ -38,8 +38,23 @@ sprint-forecast export --out <folder>   # CSVs for Power BI (see below)
 when your process closes work in a Resolved state. `predict` scores the sprint as it stands now: the points
 done so far, the forecast for the committed points still open, the day-1 forecast beside it, and the riskiest
 open items, with items added after day 1 marked `added`. Once the sprint is over it reports the outcome.
-`predict --as-of commit` shows the day-1 view at the commit cutoff. After upgrading from 0.1, run `train`
-again: older model files are refused with a message saying so.
+`predict --as-of commit` shows the day-1 view at the commit cutoff. After upgrading, run `train` again: model
+files from an older version are refused with a message saying so.
+
+Two settings in `.sprint-forecast/config.toml`, under `[model]`:
+
+```toml
+[model]
+close_grace_hours = 12                      # done also counts items closed up to 12 h after the end, still in the sprint
+exclude_title_pattern = "placeholder|^tracking item"   # regex, case-insensitive
+```
+
+`close_grace_hours` is for teams that close the last items the morning after a sprint ends. Those items count as done
+for training, outcomes and exports, and `sprints.csv` and `items.csv` keep the strict numbers beside them
+(`pct_done_strict`, `done_strict`). The data report shows how much of the done work the grace added.
+`exclude_title_pattern` leaves out placeholder items (a standing "tracker" story, say) from everything. `extract`
+matches titles against it and stores only the IDs of the items that match, never the titles. Change it and run
+`extract` again, then `train`.
 
 ## Power BI
 
@@ -50,16 +65,31 @@ plus the forecast for the committed items still open, with the forecast made at 
 | File | One row per | Contents |
 |---|---|---|
 | `sprint_forecasts/<run_id>.csv` | run x team sprint | status, committed items and points, load vs velocity, P(full), P(>=80%), expected, p10/p50/p90 as of the run, share done so far, and the day-1 expected, p10 and p90 |
-| `item_forecasts/<run_id>.csv` | run x item open in the sprint or committed to it | work item ID, points, probability of done (1 or 0 for committed items already done or out of the sprint), top 3 risk factors for open items, state now, done so far, added after day 1 or not |
-| `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends) |
-| `items.csv` | reconstructed sprint x item in it | points, sprints already carried over, added after the commit cutoff or not, assignee at the sprint's end (display name), done (empty until the sprint ends) |
-| `cycle.csv` | finished item | team, type, points when work started and when done, re-estimated or not, started, done, business days between |
+| `item_forecasts/<run_id>.csv` | run x item open in the sprint or committed to it | work item ID, points, probability of done from the rank model (1 or 0 for committed items already done or out of the sprint), top 3 risk factors for open items, state now, done so far, added after day 1 or not, sprints in a row without a state change |
+| `sprints.csv` | reconstructed sprint | committed and done points, % done (empty until the sprint ends), and the same without the close grace |
+| `items.csv` | reconstructed sprint x item in it | points, sprints already carried over, added after the commit cutoff or not, assignee at the sprint's end (display name), done and done without the close grace (empty until the sprint ends), where it went, state changes in the sprint |
+| `cycle.csv` | finished item | team, type, points when work started and when done, re-estimated or not, started, done, business days between, moves back into a state it had left |
 | `cycle_states.csv` | finished item x state | business days the item spent in that state between starting and done |
+| `golive.csv` | active parent item with open children | team, children open and done, open points (unestimated ones at the team's median), recent burn, P(all done by the running sprint's end), the first sprint end with P >= 50% and >= 85% |
+| `golive_curve.csv` | parent x coming sprint | P(every open child done) by that sprint's end, for the running sprint and the next 12 |
 | `backtest.csv` | backtested sprint, checkpoint and model | predicted band vs actual at that point of the sprint, copied from the last `backtest` run |
 
 Forecast files are added per run and never rewritten, so the history (how the forecast moved through the sprint,
-next to the day-1 forecast) builds up; `sprints.csv`, `items.csv`, `cycle.csv`, `cycle_states.csv` and
-`backtest.csv` are replaced.
+next to the day-1 forecast) builds up; `sprints.csv`, `items.csv`, `cycle.csv`, `cycle_states.csv`, the go-live
+files and `backtest.csv` are replaced.
+
+Changed in 0.3.0: `item_forecasts` `p_done` for open items comes from the rank model, which also reads the exact
+state name (a story waiting on review ranks apart from one in development). It orders items better; the sprint
+forecast keeps model A, since the state name did not make it more accurate. `items.csv` `fate` says where each
+item went once the sprint ended: `done`, `done_in_grace` (closed within the close grace), `closed_later` (closed
+after that, still in the sprint), `carried` (moved to a later sprint), `backlog` (moved out to an undated
+iteration), `removed` or `open`.
+
+The go-live forecast covers parents (a feature, say) with an open child of the counted types and a child either
+open in a running or coming sprint or finished in the last 16 weeks. Children in the team's running sprint are
+drawn with the item model; each later sprint burns one of the parent's last 8 ended sprints (points of its
+children finished in it, from the first sprint one was started). Under 2 such sprints, or no burn in them, gets
+no curve. Work added to the parent later is not foreseen, so the dates are a floor.
 
 Changed in 0.2.0: a running sprint used to be scored at its commit cutoff, and `item_forecasts` listed committed
 items only. A report that rebuilt a projected finish from `points_done_so_far` plus the open items' `p_done`
@@ -107,7 +137,8 @@ with `--out` pointing at a synced SharePoint or OneDrive folder that Power BI re
   sprint's distribution is the committed points done by t plus a Monte Carlo over the committed items still
   open, with a shared per-sprint shock whose size is fitted by maximum likelihood; the shock widens the spread
   without moving any item's calibrated probability. Items added after day 1 are scored but stay outside the
-  committed scope the target measures.
+  committed scope the target measures. A second LightGBM, the rank model, also reads the exact state name and
+  orders items for `predict` and `item_forecasts`.
 - **Backtest**: expanding window, retrained every few sprints, with a leakage check. Each sprint is scored at
   the commit cutoff and at 25%, 50% and 75% of the way to the end: CRPS, pinball loss, Brier scores, coverage
   and MAE per model, checkpoint and team. Model A meets baseline C at the cutoff and, later on, a progress
