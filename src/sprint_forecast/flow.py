@@ -71,8 +71,8 @@ def sprint_state_changes(cache: CacheData, items: pd.DataFrame) -> pd.Series:
 
 def idle_sprints(cache: CacheData, rows: pd.DataFrame) -> pd.Series:
     """Per row (item_id, start of its current sprint, t): sprints in a row, the current one included, the item has
-    been in without a state change up to t; 0 when its state changed in the current sprint. An item whose state
-    never changed counts every dated iteration it has been in."""
+    been in that started after its last state change up to t; 0 when its state changed in the current sprint. An
+    item whose state never changed counts every dated iteration it has been in."""
     if rows.empty:
         return pd.Series(dtype="int64")
     left = rows[["item_id", "start", "t"]].reset_index(drop=True).assign(_row=lambda d: d.index)
@@ -87,7 +87,7 @@ def idle_sprints(cache: CacheData, rows: pd.DataFrame) -> pd.Series:
     been = left.merge(revs[["item_id", "changed", "iteration"]], on="item_id")
     been = been[been["changed"] <= been["t"]].drop_duplicates(["_row", "iteration"])
     been = been.assign(_end=been["iteration"].map(ends), _start=been["iteration"].map(starts)).dropna(subset=["_end"])
-    been = been[(been["_start"] <= been["t"]) & (been["last"].isna() | (been["_end"] > been["last"]))]
+    been = been[(been["_start"] <= been["t"]) & (been["last"].isna() | (been["_start"] > been["last"]))]
     counts = left["_row"].map(been.groupby("_row").size()).fillna(0).astype("int64")
     counts[left["last"].notna() & (left["last"] >= left["start"])] = 0
     return counts.set_axis(rows.index)

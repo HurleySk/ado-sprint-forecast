@@ -82,3 +82,14 @@ def test_idle_sprints_counts_sprints_in_a_row_without_a_state_change(tmp_path):
     rows = pd.DataFrame({"item_id": [1, 2, 3], "start": pd.Timestamp("2024-03-18T05:00:00Z"),
                          "t": pd.Timestamp("2024-03-25T00:00:00Z")})
     assert idle_sprints(cache, rows).tolist() == [3, 0, 1]
+
+
+def test_idle_sprints_leave_out_the_sprint_of_the_last_state_change(tmp_path):
+    cache = build_cache(tmp_path, [
+        rev(1, 1, "2024-02-20T00:00:00.000Z", iteration=IT0),
+        rev(1, 2, "2024-03-05T00:00:00.000Z", iteration=IT1, state="Active", state_category="InProgress"),
+        rev(1, 3, "2024-03-19T00:00:00.000Z", iteration=IT2, state="Active", state_category="InProgress"),
+    ], [S0, S1, S2, BACKLOG], [RED])
+    rows = pd.DataFrame({"item_id": [1], "start": pd.Timestamp("2024-03-18T05:00:00Z"),
+                         "t": pd.Timestamp("2024-03-25T00:00:00Z")})
+    assert idle_sprints(cache, rows).tolist() == [1]
