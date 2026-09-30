@@ -23,6 +23,10 @@ ASSIGNEE_FEATURES = ["assignee_load_ratio"]
 PROGRESS_FEATURES = ["elapsed", "days_left", "done_share", "days_in_state", "n_state_changes", "is_added", "reassigned"]
 FEATURES = ITEM_FEATURES + SPRINT_FEATURES + ASSIGNEE_FEATURES + PROGRESS_FEATURES
 NUMERIC = [f for f in FEATURES if f not in CATEGORICAL]
+# The rank model, which orders At-Risk items, also reads the exact state name. The sprint forecast does not: in
+# backtests the state name ranked items better but did not make sprint forecasts more accurate.
+RANK_CATEGORICAL = CATEGORICAL + ["state"]
+RANK_FEATURES = FEATURES + ["state"]
 # The day-1 frame's features (model A before 0.2.0); it still supplies sprint context and assignee load.
 DAY1_FEATURES = [
     "type", "state_category_at_commit", "points", "points_rel", "is_unestimated", "carryover_count",
@@ -31,9 +35,9 @@ DAY1_FEATURES = [
 ID_COLUMNS = ["sprint_id", "project", "team", "team_key", "iteration", "start", "end", "cutoff", "item_id"]
 FEATURE_FRAME_COLUMNS = ID_COLUMNS + DAY1_FEATURES + ["y"]
 CHECKPOINT_FRAME_COLUMNS = (
-    ID_COLUMNS + ["checkpoint", "t", "state_category_at_commit", "points_at_commit"] + FEATURES + ["y"]
+    ID_COLUMNS + ["checkpoint", "t", "state_category_at_commit", "points_at_commit"] + FEATURES + ["state", "y"]
 )
-FEATURE_VERSION = 2  # stored in the model bundle; bump when FEATURES or their meaning change
+FEATURE_VERSION = 3 # stored in the model bundle; bump when FEATURES or their meaning change
 
 VELOCITY_WINDOW = 3
 COMPLETION_WINDOW = 5
@@ -187,6 +191,7 @@ def build_checkpoint_features(rows: pd.DataFrame, day1: pd.DataFrame, history_sp
     out["days_in_state"] = (t - rows["state_changed"]) / DAY
     for col in ("n_state_changes", "is_added", "reassigned"):
         out[col] = rows[col].astype(float)
+    out["state"] = rows["state"].fillna(MISSING).astype(str) if "state" in rows else MISSING
     out["y"] = rows["y"].astype("float64")
     return out[CHECKPOINT_FRAME_COLUMNS]
 

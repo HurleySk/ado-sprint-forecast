@@ -108,3 +108,17 @@ def test_check_bundle_needs_the_current_feature_version():
     with pytest.raises(ValueError, match="older version"):
         check_bundle({"feature_version": FEATURE_VERSION - 1})
     check_bundle({"feature_version": FEATURE_VERSION})
+
+
+def test_scored_items_carry_the_rank_models_probability(synth16):
+    from sprint_forecast.model import predict_proba
+    fc = fit_forecaster(synth16.ckpt, seed=0, with_rank=True)
+    t = pd.Timestamp("2024-06-12T12:00:00Z")
+    scored = score_iteration(fc, synth16.cache, synth16.sprints, iteration="Alpha\Sprint 12", t=t,
+                             work_item_types=SYNTH_TYPES, done_categories=["Completed"], commit_grace_days=1.0)
+    items = scored[0].items
+    assert items["p_rank"].to_numpy() == pytest.approx(predict_proba(fc.rank_model, items))
+    plain = score_iteration(fit_forecaster(synth16.ckpt, seed=0), synth16.cache, synth16.sprints,
+                            iteration="Alpha\Sprint 12", t=t, work_item_types=SYNTH_TYPES,
+                            done_categories=["Completed"], commit_grace_days=1.0)
+    assert (plain[0].items["p_rank"] == plain[0].items["p"]).all()

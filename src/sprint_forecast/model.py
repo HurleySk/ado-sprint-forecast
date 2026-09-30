@@ -1,7 +1,7 @@
 """Model A: LightGBM item classifier with time-split calibration, plus a logistic-regression sanity model."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from sprint_forecast.features import CATEGORICAL, FEATURES, MISSING, NUMERIC
+from sprint_forecast.features import CATEGORICAL, FEATURES, MISSING
 
 LGBM_PARAMS = {
     "num_leaves": 15,
@@ -60,6 +60,7 @@ FEATURE_LABELS = {
     "n_state_changes": "state changes this sprint",
     "is_added": "added after day 1",
     "reassigned": "reassigned since day 1",
+    "state": "exact state",
 }
 
 
@@ -71,6 +72,8 @@ class ItemModel:
     calibration: str
     categories: dict[str, list[str]]
     calib_frame: pd.DataFrame
+    features: list[str] = field(default_factory=lambda: list(FEATURES))
+    categorical: list[str] = field(default_factory=lambda: list(CATEGORICAL))
 
 
 def split_by_time(frame: pd.DataFrame, share: float = CALIBRATION_SHARE) -> tuple[list[str], list[str]]:
@@ -85,12 +88,14 @@ def _category_values(col: pd.Series) -> pd.Series:
     return col.fillna(MISSING).astype(str)
 
 
-def to_matrix(frame: pd.DataFrame, categories: dict[str, list[str]]) -> pd.DataFrame:
-    X = frame[FEATURES].copy()
-    for col in CATEGORICAL:
+def to_matrix(
+    frame: pd.DataFrame, categories: dict[str, list[str]], features=FEATURES, categorical=CATEGORICAL,
+) -> pd.DataFrame:
+    X = frame[features].copy()
+    for col in categorical:
         values = _category_values(X[col])
         X[col] = pd.Categorical(values.where(values.isin(categories[col])), categories=categories[col])
-    for col in NUMERIC:
+    for col in _numeric(features, categorical):
         X[col] = X[col].astype("float64")
     return X
 
@@ -100,21 +105,25 @@ def _logit(p: np.ndarray) -> np.ndarray:
     return np.log(p / (1 - p))
 
 
-def _make_lr() -> Pipeline:
+def _numeric(features, categorical) -> list[str]:
+    return [f for f in features if f not in categorical]
+
+
+def _make_lr(features=FEATURES, categorical=CATEGORICAL) -> Pipeline:
     pre = ColumnTransformer([
         ("num", make_pipeline(
             SimpleImputer(strategy="median", add_indicator=True, keep_empty_features=True), StandardScaler()
-        ), NUMERIC),
-        ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL),
+        ), _numeric(features, categorical)),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), list(categorical)),
     ])
     return make_pipeline(pre, LogisticRegression(max_iter=2000))
 
 
-def _lr_input(frame: pd.DataFrame) -> pd.DataFrame:
-    X = frame[FEATURES].copy()
-    for col in CATEGORICAL:
+def _lr_input(frame: pd.DataFrame, features=FEATURES, categorical=CATEGORICAL) -> pd.DataFrame:
+    X = frame[features].copy()
+    for col in categorical:
         X[col] = _category_values(X[col]).astype(object)
-    for col in NUMERIC:
+    for col in _numeric(features, categorical):
         X[col] = X[col].astype("float64")
     return X
 
@@ -137,22 +146,29 @@ def _shock_groups(frame: pd.DataFrame) -> np.ndarray:
     return (sid + "@" + frame["checkpoint"].astype(str)).to_numpy()
 
 
-def train_item_model(frame: pd.DataFrame, seed: int = 0) -> ItemModel:
+def train_item_model(frame: pd.DataFrame, seed: int = 0, features=None, categorical=None) -> ItemModel:
+    """LightGBM on `features` (default FEATURES, with `categorical` among them), calibrated on the latest sprints,
+    plus the logistic-regression sanity model on the same features."""
+    features = list(FEATURES if features is None else features)
+    categorical = list(CATEGORICAL if categorical is None else categorical)
     frame = frame[frame["y"].notna()]
     if frame["y"].nunique() < 2:
         raise ValueError("training data needs both delivered and undelivered items")
-    categories = {c: sorted(_category_values(frame[c]).unique()) for c in CATEGORICAL}
+    categories = {c: sorted(_category_values(frame[c]).unique()) for c in categorical}
     fit_ids, cal_ids = split_by_time(frame)
     fit = frame[frame["sprint_id"].isin(fit_ids)]
     cal = frame[frame["sprint_id"].isin(cal_ids)]
     if fit["y"].nunique() < 2:
         fit, cal = frame, frame.iloc[0:0]
     lgbm = LGBMClassifier(**LGBM_PARAMS, random_state=seed)
-    lgbm.fit(to_matrix(fit, categories), fit["y"].astype(int))
-    lr = _make_lr().fit(_lr_input(fit), fit["y"].astype(int))
-    model = ItemModel(lgbm, lr, None, "none", categories, pd.DataFrame(columns=["sprint_id", "group", "p", "y"]))
+    lgbm.fit(to_matrix(fit, categories, features, categorical), fit["y"].astype(int))
+    lr = _make_lr(features, categorical).fit(_lr_input(fit, features, categorical), fit["y"].astype(int))
+    model = ItemModel(
+        lgbm, lr, None, "none", categories, pd.DataFrame(columns=["sprint_id", "group", "p", "y"]),
+        features, categorical,
+    )
     if len(cal) and cal["y"].nunique() == 2:
-        raw = lgbm.predict_proba(to_matrix(cal, categories))[:, 1]
+        raw = lgbm.predict_proba(to_matrix(cal, categories, features, categorical))[:, 1]
         y = cal["y"].astype(int).to_numpy()
         if len(cal) >= ISOTONIC_MIN_ITEMS:
             model.calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(raw, y)
@@ -173,20 +189,21 @@ def train_item_model(frame: pd.DataFrame, seed: int = 0) -> ItemModel:
 def predict_proba(model: ItemModel, frame: pd.DataFrame) -> np.ndarray:
     if len(frame) == 0:
         return np.array([], dtype=float)
-    raw = model.lgbm.predict_proba(to_matrix(frame, model.categories))[:, 1]
+    raw = model.lgbm.predict_proba(to_matrix(frame, model.categories, model.features, model.categorical))[:, 1]
     return _calibrate(model, raw)
 
 
 def predict_proba_lr(model: ItemModel, frame: pd.DataFrame) -> np.ndarray:
     if len(frame) == 0:
         return np.array([], dtype=float)
-    return model.lr.predict_proba(_lr_input(frame))[:, 1]
+    return model.lr.predict_proba(_lr_input(frame, model.features, model.categorical))[:, 1]
 
 
 def contributions(model: ItemModel, frame: pd.DataFrame) -> pd.DataFrame:
     """Per-item SHAP contributions (log-odds scale, uncalibrated) from LightGBM pred_contrib; last column 'bias'."""
-    values = model.lgbm.predict(to_matrix(frame, model.categories), pred_contrib=True)
-    return pd.DataFrame(np.asarray(values), columns=FEATURES + ["bias"], index=frame.index)
+    X = to_matrix(frame, model.categories, model.features, model.categorical)
+    values = model.lgbm.predict(X, pred_contrib=True)
+    return pd.DataFrame(np.asarray(values), columns=list(model.features) + ["bias"], index=frame.index)
 
 
 def _pct(v) -> str:
@@ -231,6 +248,7 @@ PHRASES = {
     "n_state_changes": lambda v: f"{_count(v, 'state change')} this sprint",
     "is_added": lambda v: "added after day 1" if v else "committed on day 1",
     "reassigned": lambda v: "reassigned since day 1" if v else "same assignee as on day 1",
+    "state": lambda v: f"state is {v}",
 }
 
 
@@ -260,8 +278,9 @@ def _describe(feature: str, values: pd.Series) -> str:
 
 def describe_drivers(contrib: pd.Series, values: pd.Series, k: int = 2) -> list[str]:
     """The k most negative contributions, in plain words, e.g. 'already carried over 2 sprints'.
-    Features that read the same (both velocity ratios when the team has no velocity) are listed once."""
-    neg = contrib[FEATURES]
+    Features that read the same (both velocity ratios when the team has no velocity) are listed once. When the
+    model reads the exact state, its category is left out."""
+    neg = contrib.drop(["bias", "state_category"] if "state" in contrib.index else ["bias"], errors="ignore")
     out: list[str] = []
     for f in neg[neg < 0].sort_values().index:
         if len(out) >= k:

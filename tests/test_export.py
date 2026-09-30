@@ -142,6 +142,21 @@ def test_export_item_rows_match_their_sprint(exported):
     assert joined["points_done_so_far"].to_numpy() == pytest.approx(done.reindex(joined.index).to_numpy())
 
 
+def test_the_rank_model_orders_items_but_leaves_sprint_forecasts_alone(synth16, bundle, tmp_path):
+    ranked = {**bundle, "forecaster": fit_forecaster(synth16.ckpt, seed=0, with_rank=True)}
+    runs = {}
+    for name, b in (("plain", bundle), ("ranked", ranked)):
+        result = export_forecasts(synth16.cache, b, tmp_path / name, now=NOW)
+        runs[name] = (
+            pd.read_csv(tmp_path / name / "sprint_forecasts" / f"{result.run_id}.csv"),
+            pd.read_csv(tmp_path / name / "item_forecasts" / f"{result.run_id}.csv"),
+        )
+    cols = ["sprint_id", "expected", "p10", "p50", "p90", "p_full"]
+    pd.testing.assert_frame_equal(runs["plain"][0][cols], runs["ranked"][0][cols])
+    plain, rank = (runs[k][1].set_index(["forecast_key", "item_id"])["p_done"] for k in ("plain", "ranked"))
+    assert not (plain - rank.reindex(plain.index)).abs().lt(1e-9).all()
+
+
 @pytest.fixture(scope="module")
 def late(synth16, bundle, tmp_path_factory):
     """A week later (2024-06-19 12:00 UTC): committed items are finishing and Team Blue has two open added items."""

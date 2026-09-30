@@ -8,6 +8,7 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.special import expit, logsumexp
 
+from sprint_forecast.features import RANK_CATEGORICAL, RANK_FEATURES
 from sprint_forecast.model import P_CLIP, ItemModel, predict_proba, train_item_model
 
 GH_NODES = 32
@@ -116,14 +117,23 @@ def summarize(samples: np.ndarray) -> dict[str, float]:
 class Forecaster:
     item_model: ItemModel
     sigma: float
+    rank_model: ItemModel | None = None  # orders items for listing; reads the exact state as well
+
+    @property
+    def ranker(self) -> ItemModel:
+        return self.item_model if self.rank_model is None else self.rank_model
 
 
-def fit_forecaster(frame: pd.DataFrame, seed: int = 0) -> Forecaster:
-    """Train model A and fit sigma on its calibrated predictions for the calibration sprints."""
+def fit_forecaster(frame: pd.DataFrame, seed: int = 0, with_rank: bool = False) -> Forecaster:
+    """Train model A and fit sigma on its calibrated predictions for the calibration sprints. with_rank also trains
+    the rank model on the same rows."""
     model = train_item_model(frame, seed=seed)
     cf = model.calib_frame
     sigma = fit_sigma(cf["p"].to_numpy(), cf["y"].to_numpy(), cf["group"].to_numpy()) if len(cf) else 0.0
-    return Forecaster(model, sigma)
+    rank = (
+        train_item_model(frame, seed=seed, features=RANK_FEATURES, categorical=RANK_CATEGORICAL) if with_rank else None
+    )
+    return Forecaster(model, sigma, rank)
 
 
 def forecast_sprint(

@@ -155,7 +155,7 @@ def _train(workdir: Path, s: Settings) -> dict:
     sd = _build(cache, s)
     frame = _checkpoint_frame(cache, sd, s)
     try:
-        fc = fit_forecaster(frame, seed=0)
+        fc = fit_forecaster(frame, seed=0, with_rank=True)
     except ValueError as e:
         raise click.ClickException(f"cannot train: {e}") from None
     known = frame[frame["y"].notna()]
@@ -295,15 +295,15 @@ def _predict(
                 f"  day-1 forecast: expected {_pct(d1['expected'])}, p10/p50/p90 "
                 f"{_pct(d1['p10'])} / {_pct(d1['p50'])} / {_pct(d1['p90'])}"
             )
-        risky = sc.items.sort_values("p", kind="mergesort").head(top)
+        risky = sc.items.sort_values("p_rank", kind="mergesort").head(top)
         if len(risky):
             click.echo("  riskiest items:")
-            contrib = contributions(fc.item_model, risky)
+            contrib = contributions(fc.ranker, risky)
             for idx, r in risky.iterrows():
                 drivers = describe_drivers(contrib.loc[idx], r)
                 title = _truncate(titles.get(int(r["item_id"]), "")) if titles else ""
                 added = "  added" if r["is_added"] == 1 else ""
-                click.echo(f"    #{int(r['item_id'])}  p={r['p']:.2f}  {r['points']:.1f} pts{added}  {title}".rstrip())
+                click.echo(f"    #{int(r['item_id'])}  p={r['p_rank']:.2f}  {r['points']:.1f} pts{added}  {title}".rstrip())
                 if drivers:
                     click.echo(f"        why: {'; '.join(drivers)}")
         results.append({"sprint_id": srow["sprint_id"], **summary})

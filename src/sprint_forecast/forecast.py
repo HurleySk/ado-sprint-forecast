@@ -10,6 +10,7 @@ import pandas as pd
 from sprint_forecast.cache import CacheData
 from sprint_forecast.checkpoints import done_points_at, open_rows
 from sprint_forecast.features import FEATURE_VERSION, build_checkpoint_features, build_features_for, team_history
+from sprint_forecast.model import predict_proba
 from sprint_forecast.rollup import Forecaster, forecast_sprint, simulate_pct_done, summarize
 from sprint_forecast.sprints import SprintData, horizon, iteration_group, scope_at, sprint_calendar
 from sprint_forecast.timeline import to_utc
@@ -20,7 +21,8 @@ OLD_MODEL = "model was trained by an older version; run `sprint-forecast train`"
 @dataclass
 class ScoredSprint:
     sprint: pd.Series  # one summarize_sprints row of the committed scope; outcome columns empty while it runs
-    items: pd.DataFrame  # open rows at t (checkpoint features) plus "p", each item's calibrated probability of done
+    items: pd.DataFrame  # open rows at t (checkpoint features) plus "p", each item's calibrated probability of done,
+    # and "p_rank", the rank model's (p when there is none)
     summary: dict[str, float]  # summarize() of the simulated share of committed points done by the sprint's end
     velocity: float  # team trailing velocity in points; NaN without history
     done_points: float  # committed points in the iteration and done at t; 0 before the cutoff
@@ -86,12 +88,13 @@ def score_iteration(
         done_points = float(done.get(sid, 0.0))
         total = float(sprint["committed_points"])
         if t >= end:  # over: whatever is still open did not finish
-            p = np.zeros(len(mine))
+            p = p_rank = np.zeros(len(mine))
             samples = simulate_pct_done(p[:0], p[:0], fc.sigma, done_points=done_points, total_points=total)
         else:
             p, samples = forecast_sprint(fc, mine, seed=0, done_points=done_points, total_points=total)
+            p_rank = p if fc.rank_model is None else predict_proba(fc.rank_model, mine)
         scored.append(ScoredSprint(
-            sprint, mine.assign(p=p), summarize(samples), float(velocity.get(sid, math.nan)), done_points, t,
+            sprint, mine.assign(p=p, p_rank=p_rank), summarize(samples), float(velocity.get(sid, math.nan)), done_points, t,
             items[items["sprint_id"] == sid],
         ))
     return scored

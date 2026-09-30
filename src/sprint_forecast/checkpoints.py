@@ -30,7 +30,7 @@ OPEN_ROW_COLUMNS = CALENDAR_COLUMNS + [
     "t", "item_id", "type", "state_category", "state_category_at_commit", "points_at_commit", "area",
     "assigned_to_sk", "parent_id", "created", "last_changed", "state_changed", "revisions_so_far", "n_state_changes",
     "carryover_count", "raw_points", "points", "is_unestimated", "is_added", "reassigned", "committed_points",
-    "done_points_at_t", "y",
+    "done_points_at_t", "y", "state",
 ]
 CHECKPOINT_ROW_COLUMNS = ["checkpoint"] + OPEN_ROW_COLUMNS
 PROGRESS_COLUMNS = ["sprint_id", "checkpoint", "t", "done_points", "committed_points"]
@@ -128,6 +128,7 @@ def open_rows(
     rows["item_id"] = rows["item_id"].astype("int64")
     for col in ("type", "state_category", "area", "assigned_to_sk", "parent_id", "created"):
         rows[col] = st[col]
+    rows["state"] = st["state"]
     rows["last_changed"] = st["changed"]
     rows["revisions_so_far"] = st["revisions_so_far"].astype("int64")
     rows["raw_points"] = raw_points(st)

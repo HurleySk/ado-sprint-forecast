@@ -163,3 +163,23 @@ def test_missing_categories_train_and_predict(synth40):
     assert "(missing)" in model.categories["state_category"]
     p = predict_proba(model, frame.head(50))
     assert np.isfinite(p).all() and np.isfinite(predict_proba_lr(model, frame.head(50))).all()
+
+
+def test_a_rank_model_also_reads_the_exact_state(synth40):
+    from sprint_forecast.features import RANK_CATEGORICAL, RANK_FEATURES
+    train, test = _time_split(synth40.ckpt)
+    assert set(train["state"]) >= {"New", "Active"}
+    m = train_item_model(train, seed=0, features=RANK_FEATURES, categorical=RANK_CATEGORICAL)
+    assert m.features == RANK_FEATURES and "state" in m.categories
+    assert np.isfinite(predict_proba(m, test.head(3).assign(state="A State Never Seen"))).all()
+    assert predict_proba_lr(m, test.head(3)).shape == (3,)
+    assert list(contributions(m, test.head(2)).columns) == RANK_FEATURES + ["bias"]
+    assert roc_auc_score(test["y"], predict_proba(m, test)) > 0.65
+
+
+def test_describe_drivers_names_the_exact_state_over_its_category():
+    from sprint_forecast.features import RANK_FEATURES
+    contrib = pd.Series(0.0, index=RANK_FEATURES + ["bias"])
+    contrib[["state", "state_category", "carryover_count"]] = [-1.0, -0.5, -0.2]
+    values = pd.Series({"state": "Waiting", "state_category": "InProgress", "carryover_count": 2.0})
+    assert describe_drivers(contrib, values) == ["state is Waiting", "already carried over 2 sprints"]

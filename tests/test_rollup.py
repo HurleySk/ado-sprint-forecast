@@ -98,3 +98,9 @@ def test_rollup_adds_the_points_already_done():
     nothing_open = simulate_pct_done(np.array([]), np.array([]), 0.5, n_draws=10, done_points=3.0, total_points=8.0)
     assert np.all(nothing_open == 3 / 8)
     assert np.isnan(simulate_pct_done(np.array([0.5]), np.array([1.0]), 0.5, n_draws=10, total_points=0.0)).all()
+
+
+def test_forecaster_can_carry_a_rank_model_that_reads_the_exact_state(synth16):
+    assert fit_forecaster(synth16.ckpt, seed=0).rank_model is None
+    fc = fit_forecaster(synth16.ckpt, seed=0, with_rank=True)
+    assert "state" in fc.rank_model.features and "state" not in fc.item_model.features

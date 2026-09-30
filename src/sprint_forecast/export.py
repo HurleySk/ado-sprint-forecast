@@ -185,11 +185,11 @@ def _item_rows(fc, scored: ScoredSprint, cache: CacheData, done_categories, run_
     parts = []
     if len(rows):
         added = rows["is_added"] == 1
-        contrib = contributions(fc.item_model, rows)
+        contrib = contributions(fc.ranker, rows)
         parts.append(_item_frame(
             rows,
             points=rows["points_at_commit"].where(~added, rows["points"]).astype("float64"),
-            p_done=rows["p"].astype("float64"),
+            p_done=rows["p_rank"].astype("float64"),
             is_added=added,
             factors=[describe_drivers(contrib.loc[i], rows.loc[i], k=N_RISK_FACTORS) for i in rows.index],
             progress=progress_at(cache, rows, scored.t, done_categories),
