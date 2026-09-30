@@ -48,7 +48,8 @@ def _parent_team(ch: pd.DataFrame) -> str | None:
 
 def _steps(tcal: pd.DataFrame, now: pd.Timestamp, horizon_sprints: int) -> list[tuple[int, str | None, pd.Timestamp]]:
     """(k, iteration, end) of the running sprint (k = 0, when there is one) and the next `horizon_sprints`, dated
-    past the calendar on the team's usual cadence."""
+    past the calendar on the team's usual cadence (its median sprint length, else 14 days, when sprints share a
+    start). A calendar that ran out before `now` is stepped on to the first end after it."""
     steps = []
     running = tcal[(tcal["start"] <= now) & (tcal["end"] > now)].head(1)
     for r in running.itertuples(index=False):
@@ -57,8 +58,13 @@ def _steps(tcal: pd.DataFrame, now: pd.Timestamp, horizon_sprints: int) -> list[
     for k, r in enumerate(future.itertuples(index=False), start=1):
         steps.append((k, r.iteration, r.end))
     starts = tcal["start"].sort_values()
-    cadence = starts.diff().dropna().median() if len(starts) > 1 else (tcal["end"] - tcal["start"]).median()
+    cadence = starts.diff().dropna().median() if len(starts) > 1 else pd.NaT
+    for fallback in ((tcal["end"] - tcal["start"]).median(), pd.Timedelta(days=14)):
+        if pd.isna(cadence) or cadence <= pd.Timedelta(0):
+            cadence = fallback
     last = steps[-1][2] if steps else tcal["end"].max()
+    if last + cadence <= now:
+        last = last + cadence * ((now - last) // cadence)
     for k in range(len(future) + 1, horizon_sprints + 1):
         last = last + cadence
         steps.append((k, None, last))

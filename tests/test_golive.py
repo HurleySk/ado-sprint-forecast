@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from helpers import build_cache, iteration, rev, team
-from sprint_forecast.golive import CURVE_COLUMNS, PARENT_COLUMNS, golive
+from sprint_forecast.golive import CURVE_COLUMNS, PARENT_COLUMNS, _steps, golive
 from sprint_forecast.sprints import build_sprints
 
 TYPES = ["User Story", "Bug"]
@@ -75,6 +75,26 @@ def test_the_curve_runs_past_the_calendar_on_the_teams_sprint_length(tmp_path):
     assert c.loc[3, "end"] - c.loc[2, "end"] == pd.Timedelta(days=14)
     assert c.loc[7, "p_done_by"] == 0.0 and c.loc[8, "p_done_by"] == 1.0
     assert c["p_done_by"].is_monotonic_increasing
+
+
+def test_a_calendar_that_ran_out_dates_every_sprint_after_now(tmp_path):
+    now = STARTS[6] + pd.Timedelta(days=60)
+    _, curve = run(tmp_path, STEADY + [rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=40.0)],
+                   now=now)
+    ends = curve.sort_values("k")["end"]
+    assert curve["k"].min() == 1 and ends.iloc[0] > now and ends.iloc[0] - now <= pd.Timedelta(days=14)
+    assert (ends.diff().dropna() == pd.Timedelta(days=14)).all()
+
+
+def test_sprints_sharing_a_start_date_still_step_forward():
+    tcal = pd.DataFrame({
+        "iteration": ["A", "B"],
+        "start": pd.to_datetime(["2024-01-01T05:00:00Z", "2024-01-01T05:00:00Z"]),
+        "end": pd.to_datetime(["2024-01-15T05:00:00Z", "2024-01-15T05:00:00Z"]),
+    })
+    steps = _steps(tcal, pd.Timestamp("2024-02-01T00:00:00Z"), 3)
+    ends = [end for _, _, end in steps]
+    assert ends[0] > pd.Timestamp("2024-02-01T00:00:00Z") and ends[1] - ends[0] == pd.Timedelta(days=14)
 
 
 def test_children_in_the_running_sprint_are_drawn_with_the_item_model(tmp_path):
