@@ -93,7 +93,7 @@ the parent's team draws one of its last 8 ended sprints, from the first sprint a
 children finished in it, less the points of children linked to the parent in it after that start. The parent is done
 the first sprint every child linked by then is done. Under 2 such sprints, or no burn in them, gets no curve. The
 `_no_growth` columns leave the added scope out, so their dates are the earliest likely; a parent growing as fast as
-it burns gets only those.
+it burns gets only those. Before 0.3.1, `p50_end` and `p85_end` were the no-growth dates.
 
 Changed in 0.2.0: a running sprint used to be scored at its commit cutoff, and `item_forecasts` listed committed
 items only. A report that rebuilt a projected finish from `points_done_so_far` plus the open items' `p_done`

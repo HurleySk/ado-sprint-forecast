@@ -89,11 +89,12 @@ def golive(
     seed: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """One row per parent with open children of the counted types that is active (a child open in a running or
-    coming sprint, or finished in the last `active_days`), and its curve: P(every open child done) by the end of
-    each sprint k, with the scope linked to it since its first child started drawn back in from the sprint after the
-    running one (`p_done_by_no_growth` without it). `p_open` holds the item model's probability for items open in
-    running sprints; `sigma` is the sprint shock those are drawn with. Parents with under two ended sprints since
-    their first child started, or no burn in them, get no curve."""
+    coming sprint, or finished in the last `active_days`), and its curve: P(every child done) by the end of each
+    sprint k, with the scope linked to it since work on it began drawn back in from the sprint after the running one
+    (`p_done_by_no_growth` without it). A child finished before it was linked is neither burn nor growth. `p_open`
+    holds the item model's probability for items open in running sprints; `sigma` is the sprint shock those are
+    drawn with. Parents with under two ended sprints since their first child started under them, or no burn in them,
+    get no curve."""
     now = to_utc(now)
     done = set(done_categories)
     p_open = p_open or {}
@@ -116,9 +117,12 @@ def golive(
 
     kids["done_at"] = per_kid(last_done["changed"]).where(kids["is_done"])
     started = theirs[theirs["state_category"].isin(set(ACTIVE_CATEGORIES) | done)].groupby("item_id")["changed"].min()
-    kids["started"] = per_kid(started)
     linked = theirs[theirs["parent_id"] == theirs["item_id"].map(kids.set_index("item_id")["parent_id"])]
     kids["linked_at"] = per_kid(linked.groupby("item_id")["changed"].min())
+    kids["done_elsewhere"] = kids["done_at"] < kids["linked_at"]  # finished, then moved under this parent
+    started = per_kid(started)
+    kids["started"] = started.where(started.isna() | (started >= kids["linked_at"]), kids["linked_at"]).where(
+        ~kids["done_elsewhere"])  # its start under this parent
     kids["raw_points"] = raw_points(kids).where(~kids["is_done"], per_kid(raw_points(last_done)))
     kids["raw_points"] = kids["raw_points"].fillna(raw_points(kids))
     team = _teams(cache, kids)
@@ -153,11 +157,12 @@ def golive(
         past = tcal[tcal["end"] <= now]
         first_start = ch["started"].min()
         windows = past[past["end"] > first_start].tail(BURN_WINDOW)
-        grown = ch[ch["linked_at"] > first_start]
+        here = ch[~ch["done_elsewhere"]]
+        burned, grown = here[here["is_done"]], here[here["linked_at"] > first_start]
         burn, added = (np.array([
             rows.loc[(rows[at] >= w.start) & (rows[at] <= w.end), "points"].sum()
             for w in windows.itertuples(index=False)
-        ], dtype=float) for rows, at in ((finished, "done_at"), (grown, "linked_at")))
+        ], dtype=float) for rows, at in ((burned, "done_at"), (grown, "linked_at")))
         row["burn_sprints"] = len(burn)
         row["mean_burn"] = float(burn.mean()) if len(burn) else np.nan
         row["mean_added"] = float(added.mean()) if len(added) else np.nan

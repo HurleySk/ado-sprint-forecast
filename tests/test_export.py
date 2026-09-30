@@ -306,3 +306,7 @@ def test_export_writes_go_live_forecasts_for_parents_with_open_children(exported
     assert curve["p_done_by"].between(0, 1).all()
     assert curve.groupby("parent_id")["p_done_by"].apply(lambda s: s.is_monotonic_increasing).all()
     assert (parents["p50_end"].isna() | (parents["p50_end"] <= parents["p85_end"]) | parents["p85_end"].isna()).all()
+    assert curve.groupby("parent_id")["p_done_by_no_growth"].apply(lambda s: s.is_monotonic_increasing).all()
+    assert (curve["p_done_by"] <= curve["p_done_by_no_growth"]).all()
+    floor, dated = parents["p50_end_no_growth"], parents["p50_end"].notna()
+    assert (floor[dated].notna() & (floor[dated] <= parents.loc[dated, "p50_end"])).all()

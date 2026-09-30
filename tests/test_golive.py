@@ -98,6 +98,28 @@ def test_a_child_moved_from_another_parent_is_growth_when_it_moved(tmp_path):
     assert parents.set_index("parent_id").loc[100, "mean_added"] == 2.0
 
 
+def test_work_started_under_another_parent_does_not_start_the_clock(tmp_path):
+    parents, _ = run(tmp_path, STEADY + [
+        rev(4, 1, PLANNED, parent_id=900, story_points=3.0),
+        rev(4, 2, day(0, 2), parent_id=900, iteration=PATHS[0], story_points=3.0, **ACTIVE),
+        rev(4, 3, day(2, 6), parent_id=100, iteration=BACKLOG, story_points=3.0, **ACTIVE),
+        rev(5, 1, day(1, 1), parent_id=100, iteration=BACKLOG, story_points=25.0),
+    ])
+    p = parents.set_index("parent_id").loc[100]
+    assert (p["burn_sprints"], p["mean_added"]) == (3, 1.0)
+
+
+def test_a_child_finished_elsewhere_and_moved_in_is_neither_burn_nor_growth(tmp_path):
+    parents, _ = run(tmp_path, STEADY + [
+        rev(4, 1, PLANNED, parent_id=900, iteration=PATHS[1], story_points=8.0, **ACTIVE),
+        rev(4, 2, day(1, 5), parent_id=900, iteration=PATHS[1], story_points=8.0, **CLOSED),
+        rev(4, 3, day(2, 6), parent_id=100, iteration=PATHS[1], story_points=8.0, **CLOSED),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
+    ])
+    p = parents.set_index("parent_id").loc[100]
+    assert (p["mean_burn"], p["mean_added"], p["done_points"]) == (5.0, 0.0, 23.0)
+
+
 def test_a_parent_growing_as_fast_as_it_burns_keeps_only_its_floor_dates(tmp_path):
     added = [rev(10 + k, 1, day(k, 6), parent_id=100, iteration=BACKLOG, story_points=5.0) for k in (1, 2, 3)]
     parents, curve = run(tmp_path, STEADY + added)
