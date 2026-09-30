@@ -71,8 +71,8 @@ plus the forecast for the committed items still open, with the forecast made at 
 | `items.csv` | reconstructed sprint x item in it | points, sprints already carried over, added after the commit cutoff or not, assignee at the sprint's end (display name), done and done without the close grace (empty until the sprint ends), where it went, state changes in the sprint |
 | `cycle.csv` | finished item | team, type, points when work started and when done, re-estimated or not, started, done, business days between, moves back into a state it had left |
 | `cycle_states.csv` | finished item x state | business days the item spent in that state between starting and done |
-| `golive.csv` | active parent item with open children | team, children open and done, open points (unestimated ones at the team's median), recent burn, P(all done by the running sprint's end), the first sprint end with P >= 50% and >= 85% |
-| `golive_curve.csv` | parent x coming sprint | P(every open child done) by that sprint's end, for the running sprint and the next 12 |
+| `golive.csv` | active parent item with open children | team, children open and done, open points (unestimated ones at the team's median), recent burn and scope added, P(all done by the running sprint's end), the first sprint end with P >= 50% and >= 85%, with and without scope growth |
+| `golive_curve.csv` | parent x coming sprint | P(every child done) by that sprint's end, for the running sprint and the next 12, with and without scope growth |
 | `backtest.csv` | backtested sprint, checkpoint and model | predicted band vs actual at that point of the sprint, copied from the last `backtest` run |
 
 Forecast files are added per run and never rewritten, so the history (how the forecast moved through the sprint,
@@ -89,9 +89,11 @@ iteration), `removed` or `open`.
 The go-live forecast covers parents (a feature, say) with an open child of the counted types and a child either
 open in a running or coming sprint or finished in the last 16 weeks. Its team is the one holding most of its open
 children's points. Children open in any team's running sprint are drawn with the item model; each later sprint of
-the parent's team burns one of its last 8 ended sprints (points of the children finished in it, from the first
-sprint one was started). Under 2 such sprints, or no burn in them, gets
-no curve. Work added to the parent later is not foreseen, so the dates are a floor.
+the parent's team draws one of its last 8 ended sprints, from the first sprint a child was started: the points of the
+children finished in it, less the points of children linked to the parent in it after that start. The parent is done
+the first sprint every child linked by then is done. Under 2 such sprints, or no burn in them, gets no curve. The
+`_no_growth` columns leave the added scope out, so their dates are the earliest likely; a parent growing as fast as
+it burns gets only those.
 
 Changed in 0.2.0: a running sprint used to be scored at its commit cutoff, and `item_forecasts` listed committed
 items only. A report that rebuilt a projected finish from `points_done_so_far` plus the open items' `p_done`

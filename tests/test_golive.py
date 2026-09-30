@@ -29,11 +29,14 @@ def day(k: int, d: int) -> str:
     return (STARTS[k] + pd.Timedelta(days=d)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def finished(item_id: int, k: int, parent: int, points=5.0) -> list[dict]:
-    """A child planned into Sprint k, started on its day 2 and closed on day 5."""
+PLANNED = day(0, -3)  # before any child starts, so not scope growth
+
+
+def finished(item_id: int, k: int, parent: int, points=5.0, linked=PLANNED) -> list[dict]:
+    """A child linked to the parent at `linked`, planned into Sprint k, started on its day 2 and closed on day 5."""
     it = PATHS[k]
     return [
-        rev(item_id, 1, day(k, -3), parent_id=parent, story_points=points),
+        rev(item_id, 1, linked, parent_id=parent, story_points=points),
         rev(item_id, 2, day(k, 0), parent_id=parent, story_points=points, iteration=it),
         rev(item_id, 3, day(k, 2), parent_id=parent, story_points=points, iteration=it, **ACTIVE),
         rev(item_id, 4, day(k, 5), parent_id=parent, story_points=points, iteration=it, **CLOSED),
@@ -52,8 +55,8 @@ STEADY = finished(1, 1, 100) + finished(2, 2, 100) + finished(3, 3, 100)
 
 def test_a_steady_feature_finishes_when_its_burn_covers_what_is_left(tmp_path):
     parents, curve = run(tmp_path, STEADY + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
-        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
     ])
     assert list(parents.columns) == PARENT_COLUMNS and list(curve.columns) == CURVE_COLUMNS
     p = parents.set_index("parent_id").loc[100]
@@ -67,8 +70,56 @@ def test_a_steady_feature_finishes_when_its_burn_covers_what_is_left(tmp_path):
     assert p["p50_end"] == p["p85_end"] == c.loc[2, "end"] == pd.Timestamp(SPRINTS[6]["end_date"])
 
 
+def test_scope_added_while_work_burns_pushes_the_date_out(tmp_path):
+    added = [rev(10 + k, 1, day(k, 6), parent_id=100, iteration=BACKLOG, story_points=2.0) for k in (1, 2, 3)]
+    parents, curve = run(tmp_path, STEADY + added + [
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=6.0),
+    ])
+    p = parents.set_index("parent_id").loc[100]
+    assert (p["open_points"], p["mean_burn"], p["mean_added"]) == (12.0, 5.0, 2.0)
+    c = curve.set_index("k")
+    assert c.loc[:4, "p_done_by"].tolist() == [0.0, 0.0, 0.0, 0.0, 1.0]
+    assert c.loc[:3, "p_done_by_no_growth"].tolist() == [0.0, 0.0, 0.0, 1.0]
+    assert p["p50_end"] == p["p85_end"] == c.loc[4, "end"]
+    assert p["p50_end_no_growth"] == p["p85_end_no_growth"] == c.loc[3, "end"]
+
+
+def test_children_linked_before_work_began_are_not_growth(tmp_path):
+    parents, _ = run(tmp_path, STEADY + [rev(4, 1, day(1, 1), parent_id=100, iteration=BACKLOG, story_points=10.0)])
+    p = parents.set_index("parent_id").loc[100]
+    assert p["mean_added"] == 0.0 and p["p50_end"] == p["p50_end_no_growth"]
+
+
+def test_a_child_moved_from_another_parent_is_growth_when_it_moved(tmp_path):
+    parents, _ = run(tmp_path, STEADY + [
+        rev(4, 1, PLANNED, parent_id=900, iteration=BACKLOG, story_points=6.0),
+        rev(4, 2, day(2, 6), parent_id=100, iteration=BACKLOG, story_points=6.0),
+    ])
+    assert parents.set_index("parent_id").loc[100, "mean_added"] == 2.0
+
+
+def test_a_parent_growing_as_fast_as_it_burns_keeps_only_its_floor_dates(tmp_path):
+    added = [rev(10 + k, 1, day(k, 6), parent_id=100, iteration=BACKLOG, story_points=5.0) for k in (1, 2, 3)]
+    parents, curve = run(tmp_path, STEADY + added)
+    p = parents.set_index("parent_id").loc[100]
+    assert p["status"] == "forecast" and (p["mean_burn"], p["mean_added"]) == (5.0, 5.0)
+    assert pd.isna(p["p50_end"]) and pd.isna(p["p85_end"]) and (curve["p_done_by"] == 0.0).all()
+    assert p["p50_end_no_growth"] == curve.set_index("k").loc[3, "end"]
+
+
+def test_a_parent_stays_done_when_a_later_sprint_would_have_added_scope(tmp_path):
+    parents, curve = run(tmp_path, finished(1, 1, 100, points=20.0) + finished(2, 2, 100, points=1.0)
+                         + finished(3, 3, 100, points=30.0, linked=day(2, 6)) + [
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=10.0),
+    ])
+    assert parents.set_index("parent_id").loc[100, "mean_added"] == 10.0
+    c = curve.set_index("k")["p_done_by"]
+    assert 0.6 < c[1] < 0.73 and c[2] == c[1]
+    assert c.is_monotonic_increasing
+
+
 def test_the_curve_runs_past_the_calendar_on_the_teams_sprint_length(tmp_path):
-    _, curve = run(tmp_path, STEADY + [rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=40.0)])
+    _, curve = run(tmp_path, STEADY + [rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=40.0)])
     c = curve.set_index("k")
     assert c.index.tolist() == list(range(13))
     assert c.loc[3, "iteration"] is None or pd.isna(c.loc[3, "iteration"])
@@ -79,7 +130,7 @@ def test_the_curve_runs_past_the_calendar_on_the_teams_sprint_length(tmp_path):
 
 def test_a_calendar_that_ran_out_dates_every_sprint_after_now(tmp_path):
     now = STARTS[6] + pd.Timedelta(days=60)
-    _, curve = run(tmp_path, STEADY + [rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=40.0)],
+    _, curve = run(tmp_path, STEADY + [rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=40.0)],
                    now=now)
     ends = curve.sort_values("k")["end"]
     assert curve["k"].min() == 1 and ends.iloc[0] > now and ends.iloc[0] - now <= pd.Timedelta(days=14)
@@ -99,9 +150,9 @@ def test_sprints_sharing_a_start_date_still_step_forward():
 
 def test_children_in_the_running_sprint_are_drawn_with_the_item_model(tmp_path):
     revs = STEADY + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
         rev(4, 2, day(4, 0), parent_id=100, iteration=PATHS[4], story_points=5.0, **ACTIVE),
-        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
     ]
     parents, curve = run(tmp_path, revs, p_open={4: 0.9999})
     c = curve.set_index("k")["p_done_by"]
@@ -113,9 +164,9 @@ def test_children_in_the_running_sprint_are_drawn_with_the_item_model(tmp_path):
 
 def test_children_in_another_teams_running_sprint_are_drawn_too(tmp_path):
     parents, curve = run(tmp_path, STEADY + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
         rev(4, 2, day(4, 0), parent_id=100, iteration=PATHS[4], story_points=5.0, **ACTIVE),
-        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, area="Alpha\\Blue", story_points=3.0),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, area="Alpha\\Blue", story_points=3.0),
         rev(5, 2, day(4, 0), parent_id=100, iteration=BLUE_PATH, area="Alpha\\Blue", story_points=3.0, **ACTIVE),
     ], iterations=SPRINTS + [BLUE_SPRINT], teams=(RED, BLUE), p_open={4: 0.9999, 5: 0.9999})
     p = parents.set_index("parent_id").loc[100]
@@ -125,9 +176,9 @@ def test_children_in_another_teams_running_sprint_are_drawn_too(tmp_path):
 
 def test_the_parent_team_holds_most_of_the_open_points(tmp_path):
     parents, _ = run(tmp_path, STEADY + finished(6, 1, 700) + finished(7, 2, 700) + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, area="Alpha\\Blue", story_points=8.0),
-        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=2.0),
-        rev(8, 1, day(3, 1), parent_id=700, iteration=BACKLOG, area="Alpha\\Green", story_points=5.0),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, area="Alpha\\Blue", story_points=8.0),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=2.0),
+        rev(8, 1, PLANNED, parent_id=700, iteration=BACKLOG, area="Alpha\\Green", story_points=5.0),
     ], iterations=SPRINTS + [BLUE_SPRINT], teams=(RED, BLUE))
     teams = parents.set_index("parent_id")["team_key"]
     assert teams[100] == "Alpha/Team Blue"
@@ -147,19 +198,19 @@ def reclosed(item_id: int, parent: int) -> list[dict]:
 
 def test_a_reclosed_child_burns_when_and_as_it_was_last_closed(tmp_path):
     parents, _ = run(tmp_path, finished(1, 1, 100) + finished(2, 2, 100) + reclosed(3, 100) + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
     ])
     p = parents.set_index("parent_id").loc[100]
     assert (p["done_points"], p["burn_sprints"], p["mean_burn"]) == (18.0, 3, 6.0)
-    parents, _ = run(tmp_path / "b", reclosed(10, 400) + [rev(11, 1, day(3, 1), parent_id=400, iteration=BACKLOG)],
+    parents, _ = run(tmp_path / "b", reclosed(10, 400) + [rev(11, 1, PLANNED, parent_id=400, iteration=BACKLOG)],
                      active_days=30)
     assert parents["parent_id"].tolist() == [400]
 
 
 def test_removed_children_drop_out_and_unestimated_ones_take_the_team_median(tmp_path):
     parents, _ = run(tmp_path, STEADY + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=None),
-        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=None),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
         rev(5, 2, day(3, 2), parent_id=100, iteration=BACKLOG, story_points=5.0, **REMOVED),
     ])
     p = parents.set_index("parent_id").loc[100]
@@ -167,7 +218,7 @@ def test_removed_children_drop_out_and_unestimated_ones_take_the_team_median(tmp
 
 
 def test_too_little_history_gets_no_forecast(tmp_path):
-    parents, curve = run(tmp_path, finished(1, 3, 200) + [rev(2, 1, day(3, 1), parent_id=200, iteration=BACKLOG)])
+    parents, curve = run(tmp_path, finished(1, 3, 200) + [rev(2, 1, PLANNED, parent_id=200, iteration=BACKLOG)])
     p = parents.set_index("parent_id").loc[200]
     assert p["status"] == "not enough history" and p["burn_sprints"] == 1
     assert np.isnan(p["p_this_sprint"]) and pd.isna(p["p50_end"])
@@ -197,14 +248,14 @@ def test_finished_and_idle_parents_are_left_out(tmp_path):
 
 def test_items_of_other_types_do_not_count(tmp_path):
     parents, _ = run(tmp_path, STEADY + [
-        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
-        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0, type="Task"),
+        rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(5, 1, PLANNED, parent_id=100, iteration=BACKLOG, story_points=5.0, type="Task"),
     ])
     assert parents.set_index("parent_id").loc[100, "n_open"] == 1
 
 
 def test_the_forecast_is_reproducible(tmp_path):
-    revs = STEADY + finished(6, 2, 100, points=13.0) + [rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG,
+    revs = STEADY + finished(6, 2, 100, points=13.0) + [rev(4, 1, PLANNED, parent_id=100, iteration=BACKLOG,
                                                             story_points=30.0)]
     _, a = run(tmp_path, revs)
     _, b = run(tmp_path / "b", revs)
