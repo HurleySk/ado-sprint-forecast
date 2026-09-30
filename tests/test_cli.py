@@ -298,7 +298,7 @@ def test_train_and_data_use_the_close_grace_and_title_exclusion_from_config(tmp_
     from sprint_forecast.config import Config, config_path, save_config
     generate(tmp_path / ".sprint-forecast" / "cache.db", seed=5, n_sprints=8)
     save_config(Config(org_url="https://dev.azure.com/contoso", projects=["Alpha"], close_grace_hours=12.0,
-                       exclude_title_pattern="tracker"), config_path(tmp_path))
+                       exclude_title_pattern="placeholder"), config_path(tmp_path))
     assert run(tmp_path, "train").exit_code == 0
     bundle = joblib.load(tmp_path / ".sprint-forecast" / "model.joblib")
     assert bundle["close_grace_hours"] == 12.0

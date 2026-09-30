@@ -291,17 +291,17 @@ def test_user_names_unavailable_does_not_stop_the_extract(tmp_path, fake):
 def test_items_whose_title_matches_the_pattern_are_excluded_without_storing_titles(tmp_path, fake):
     fake.data[("Alpha", "WorkItemRevisions")].append(raw_rev(2, 1, "2024-05-24T16:00:00-04:00"))
     fake.data[("Alpha", "WorkItems")] = [
-        {"WorkItemId": 1, "Title": "Sprint 4 Task TRACKER"}, {"WorkItemId": 2, "Title": "Build the thing"},
+        {"WorkItemId": 1, "Title": "Sprint 4 PLACEHOLDER ITEM"}, {"WorkItemId": 2, "Title": "Build the thing"},
     ]
     conn = connect(tmp_path / "cache.db")
-    r = extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES, exclude_title_pattern=r"task tracker")
+    r = extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES, exclude_title_pattern=r"placeholder item")
     assert r.excluded == 1
     url = unquote([u for u in fake.calls if "/WorkItems?" in u][0])
     assert "$select=WorkItemId,Title" in url and "WorkItemType in ('User Story','Bug')" in url
     data = load_cache(conn)
     assert set(data.revisions["item_id"]) == {2} and data.excluded_items == {1}
     dump = "\n".join(conn.iterdump())
-    assert "TRACKER" not in dump and "Build the thing" not in dump
+    assert "PLACEHOLDER" not in dump and "Build the thing" not in dump
     extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES)  # no pattern: nothing excluded
     data = load_cache(conn)
     assert set(data.revisions["item_id"]) == {1, 2} and data.excluded_items == set()
@@ -309,12 +309,12 @@ def test_items_whose_title_matches_the_pattern_are_excluded_without_storing_titl
 
 
 def test_a_title_lookup_failure_keeps_the_previous_exclusions(tmp_path, fake):
-    fake.data[("Alpha", "WorkItems")] = [{"WorkItemId": 1, "Title": "Floating Task Tracker"}]
+    fake.data[("Alpha", "WorkItems")] = [{"WorkItemId": 1, "Title": "Standing placeholder item"}]
     conn = connect(tmp_path / "cache.db")
-    extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES, exclude_title_pattern="tracker")
+    extract_project(fake, conn, ORG, "Alpha", work_item_types=TYPES, exclude_title_pattern="placeholder")
     fake.entity_errors[("Alpha", "WorkItems")] = 500
     lines = []
-    [r] = extract_all(fake, conn, ORG, ["Alpha"], work_item_types=TYPES, exclude_title_pattern="tracker",
+    [r] = extract_all(fake, conn, ORG, ["Alpha"], work_item_types=TYPES, exclude_title_pattern="placeholder",
                       echo=lines.append)
     assert r.failed is None and r.titles_failed == "HTTP 500"
     assert "title exclusions not refreshed (HTTP 500)" in lines[0]

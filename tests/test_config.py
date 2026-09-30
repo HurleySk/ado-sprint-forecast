@@ -59,7 +59,7 @@ def test_parse_done_categories():
 
 def test_round_trip_keeps_close_grace_and_title_exclusion(tmp_path):
     cfg = Config(org_url="https://dev.azure.com/contoso", projects=["Alpha"], close_grace_hours=12.0,
-                 exclude_title_pattern=r"placeholder|^tracker\b")
+                 exclude_title_pattern=r"placeholder|^standing item\b")
     path = config_path(tmp_path)
     save_config(cfg, path)
     assert load_config(path, env={}) == cfg
