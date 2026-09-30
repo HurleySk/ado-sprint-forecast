@@ -1,0 +1,173 @@
+"""Go-live forecast: the chance that every open child of a parent item (a feature, say) is done by each coming
+sprint's end. Children in the team's running sprint are drawn with the item model; each later sprint draws one of
+the parent's own recent sprints of burn (points of its children finished in it). Scope added later is not foreseen."""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from sprint_forecast.cache import CacheData
+from sprint_forecast.cycle import ACTIVE_CATEGORIES, _teams
+from sprint_forecast.rollup import simulate_pct_done
+from sprint_forecast.sprints import REMOVED, SprintData, raw_points, sprint_calendar
+from sprint_forecast.timeline import to_utc
+
+PARENT_COLUMNS = [
+    "parent_id", "project", "team", "team_key", "n_children", "n_open", "open_points", "n_unestimated_open",
+    "in_sprint_points", "done_points", "burn_sprints", "mean_burn", "status", "p_this_sprint", "p50_end", "p85_end",
+]
+CURVE_COLUMNS = ["parent_id", "k", "iteration", "end", "p_done_by"]
+STATUSES = ("forecast", "not enough history", "no recent progress", "no team")
+BURN_WINDOW = 8     # most recent ended sprints of burn to draw from
+MIN_BURN_SPRINTS = 2
+HORIZON = 12        # sprints after the running one
+ACTIVE_DAYS = 112   # a parent with nothing in a current or coming sprint counts if a child finished this recently
+N_DRAWS = 4000
+DEFAULT_P = 0.5     # a child in the running sprint with no item-model probability
+DONE_TOL = 1e-6
+
+
+def _fill_points(kids: pd.DataFrame, history: SprintData, now: pd.Timestamp) -> pd.Series:
+    """Points of each child, unestimated ones taking the median of the team's earlier sprint items (else of every
+    team's, else 1)."""
+    known = history.items[history.items["raw_points"].notna() & (history.items["end"] < now)]
+    by_team = known.groupby("team_key")["raw_points"].median()
+    overall = float(known["raw_points"].median()) if len(known) else 1.0
+    fill = kids["team_key"].map(by_team).fillna(overall)
+    return kids["raw_points"].fillna(fill).astype("float64")
+
+
+def _parent_team(team_keys: pd.Series) -> str | None:
+    counts = team_keys.dropna().value_counts()
+    if counts.empty:
+        return None
+    return sorted(counts[counts == counts.max()].index)[0]
+
+
+def _steps(tcal: pd.DataFrame, now: pd.Timestamp, horizon_sprints: int) -> list[tuple[int, str | None, pd.Timestamp]]:
+    """(k, iteration, end) of the running sprint (k = 0, when there is one) and the next `horizon_sprints`, dated
+    past the calendar on the team's usual cadence."""
+    steps = []
+    running = tcal[(tcal["start"] <= now) & (tcal["end"] > now)].head(1)
+    for r in running.itertuples(index=False):
+        steps.append((0, r.iteration, r.end))
+    future = tcal[tcal["start"] > now].head(horizon_sprints)
+    for k, r in enumerate(future.itertuples(index=False), start=1):
+        steps.append((k, r.iteration, r.end))
+    starts = tcal["start"].sort_values()
+    cadence = starts.diff().dropna().median() if len(starts) > 1 else (tcal["end"] - tcal["start"]).median()
+    last = steps[-1][2] if steps else tcal["end"].max()
+    for k in range(len(future) + 1, horizon_sprints + 1):
+        last = last + cadence
+        steps.append((k, None, last))
+    return steps
+
+
+def golive(
+    cache: CacheData,
+    history: SprintData,
+    *,
+    now,
+    work_item_types,
+    done_categories,
+    p_open: dict[int, float] | None = None,
+    sigma: float = 0.0,
+    n_draws: int = N_DRAWS,
+    horizon_sprints: int = HORIZON,
+    active_days: float = ACTIVE_DAYS,
+    seed: int = 0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One row per parent with open children of the counted types that is active (a child open in a running or
+    coming sprint, or finished in the last `active_days`), and its curve: P(every open child done) by the end of
+    each sprint k. `p_open` holds the item model's probability for items open in running sprints; `sigma` is the
+    sprint shock those are drawn with. Parents with under two ended sprints since their first child started, or no
+    burn in them, get no curve."""
+    now = to_utc(now)
+    done = set(done_categories)
+    p_open = p_open or {}
+    parents_out, curve_out = [], []
+    revs = cache.revisions[cache.revisions["changed"] <= now]
+    latest = revs.sort_values(["item_id", "changed", "rev"], kind="mergesort").groupby("item_id").tail(1)
+    kids = latest[
+        latest["parent_id"].notna() & latest["type"].isin(work_item_types) & (latest["state_category"] != REMOVED)
+    ].copy()
+    if kids.empty:
+        return pd.DataFrame(columns=PARENT_COLUMNS), pd.DataFrame(columns=CURVE_COLUMNS)
+    kids["parent_id"] = kids["parent_id"].astype("int64")
+    kids["is_done"] = kids["state_category"].isin(done)
+    theirs = revs[revs["item_id"].isin(kids["item_id"])].sort_values(["changed", "rev"], kind="mergesort")
+    first_done = theirs[theirs["state_category"].isin(done)].groupby("item_id").head(1).set_index("item_id")
+    def per_kid(values: pd.Series) -> pd.Series:
+        return values.reindex(kids["item_id"]).set_axis(kids.index)
+
+    kids["done_at"] = per_kid(first_done["changed"]).where(kids["is_done"])
+    started = theirs[theirs["state_category"].isin(set(ACTIVE_CATEGORIES) | done)].groupby("item_id")["changed"].min()
+    kids["started"] = per_kid(started)
+    kids["raw_points"] = raw_points(kids).where(~kids["is_done"], per_kid(raw_points(first_done)))
+    kids["raw_points"] = kids["raw_points"].fillna(raw_points(kids))
+    team = _teams(cache, kids)
+    kids["team_key"] = (kids["project"] + "/" + team).where(team.notna())
+    kids["points"] = _fill_points(kids, history, now)
+
+    cal = sprint_calendar(cache)
+    live = set(cal.loc[cal["end"] > now, "iteration"])
+    recent = now - pd.Timedelta(days=active_days)
+    for pid, ch in kids.groupby("parent_id", sort=True):
+        open_ = ch[~ch["is_done"]]
+        finished = ch[ch["is_done"]]
+        if open_.empty or not (open_["iteration"].isin(live).any() or (finished["done_at"] >= recent).any()):
+            continue
+        team_key = _parent_team(ch["team_key"])
+        tcal = cal[cal["team_key"] == team_key].sort_values("start", kind="mergesort")
+        row = {
+            "parent_id": pid, "project": ch["project"].mode().iloc[0],
+            "team": team_key.split("/", 1)[1] if team_key else None, "team_key": team_key,
+            "n_children": len(ch), "n_open": len(open_), "open_points": float(open_["points"].sum()),
+            "n_unestimated_open": int(open_["raw_points"].isna().sum()), "in_sprint_points": 0.0,
+            "done_points": float(finished["points"].sum()), "burn_sprints": 0, "mean_burn": np.nan,
+            "p_this_sprint": np.nan, "p50_end": pd.NaT, "p85_end": pd.NaT,
+        }
+        running = tcal[(tcal["start"] <= now) & (tcal["end"] > now)].head(1)
+        in_sprint = open_[open_["iteration"].isin(running["iteration"])]
+        row["in_sprint_points"] = float(in_sprint["points"].sum())
+        if tcal.empty:
+            parents_out.append({**row, "status": "no team"})
+            continue
+        past = tcal[tcal["end"] <= now]
+        windows = past[past["end"] > ch["started"].min()].tail(BURN_WINDOW)
+        burn = np.array([
+            finished.loc[(finished["done_at"] >= w.start) & (finished["done_at"] <= w.end), "points"].sum()
+            for w in windows.itertuples(index=False)
+        ], dtype=float)
+        row["burn_sprints"] = len(burn)
+        row["mean_burn"] = float(burn.mean()) if len(burn) else np.nan
+        if len(burn) < MIN_BURN_SPRINTS:
+            parents_out.append({**row, "status": "not enough history"})
+            continue
+        if not burn.sum() > 0:
+            parents_out.append({**row, "status": "no recent progress"})
+            continue
+        rng = np.random.default_rng([seed, pid])
+        remaining = np.full(n_draws, row["open_points"])
+        curve = []
+        for k, it, end in _steps(tcal, now, horizon_sprints):
+            if k == 0:
+                if len(in_sprint):
+                    p = np.array([p_open.get(int(i), DEFAULT_P) for i in in_sprint["item_id"]], dtype=float)
+                    w = in_sprint["points"].to_numpy(dtype=float)
+                    share = simulate_pct_done(p, w, sigma, n_draws, seed=int(rng.integers(2**31)))
+                    remaining = remaining - share * w.sum()
+            else:
+                remaining = remaining - rng.choice(burn, size=n_draws)
+            curve.append({"parent_id": pid, "k": k, "iteration": it, "end": end,
+                          "p_done_by": float(np.mean(remaining <= DONE_TOL))})
+        c = pd.DataFrame(curve)
+        row["p_this_sprint"] = float(c.loc[c["k"] == 0, "p_done_by"].iloc[0]) if (c["k"] == 0).any() else np.nan
+        for col, level in (("p50_end", 0.5), ("p85_end", 0.85)):
+            hit = c.loc[c["p_done_by"] >= level, "end"]
+            row[col] = hit.iloc[0] if len(hit) else pd.NaT
+        parents_out.append({**row, "status": "forecast"})
+        curve_out.append(c)
+    parents = pd.DataFrame(parents_out, columns=PARENT_COLUMNS)
+    curves = pd.concat(curve_out, ignore_index=True)[CURVE_COLUMNS] if curve_out else pd.DataFrame(columns=CURVE_COLUMNS)
+    return parents, curves

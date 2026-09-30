@@ -292,3 +292,17 @@ def test_export_items_say_where_missed_work_went_and_how_it_moved(exported):
     open_rows = forecasts[forecasts["risk_factor_1"].notna()]
     assert (open_rows["idle_sprints"] >= 0).all() and open_rows["idle_sprints"].max() >= 1
     assert (pd.read_csv(out / "cycle.csv")["returns"] >= 0).all()
+
+
+def test_export_writes_go_live_forecasts_for_parents_with_open_children(exported):
+    from sprint_forecast.golive import CURVE_COLUMNS, PARENT_COLUMNS
+    out, _, _ = exported
+    parents = pd.read_csv(out / "golive.csv")
+    curve = pd.read_csv(out / "golive_curve.csv")
+    assert list(parents.columns) == PARENT_COLUMNS and list(curve.columns) == CURVE_COLUMNS
+    assert parents["parent_id"].is_unique and (parents["n_open"] > 0).all()
+    forecast = parents[parents["status"] == "forecast"]
+    assert len(forecast) > 0 and set(curve["parent_id"]) == set(forecast["parent_id"])
+    assert curve["p_done_by"].between(0, 1).all()
+    assert curve.groupby("parent_id")["p_done_by"].apply(lambda s: s.is_monotonic_increasing).all()
+    assert (parents["p50_end"].isna() | (parents["p50_end"] <= parents["p85_end"]) | parents["p85_end"].isna()).all()

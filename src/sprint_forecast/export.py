@@ -14,6 +14,7 @@ from sprint_forecast.cache import CacheData
 from sprint_forecast.cycle import CYCLE_STATE_COLUMNS, build_cycle
 from sprint_forecast.flow import idle_sprints, item_fates, sprint_state_changes
 from sprint_forecast.forecast import ScoredSprint, check_bundle, score_iteration
+from sprint_forecast.golive import golive
 from sprint_forecast.model import contributions, describe_drivers
 from sprint_forecast.sprints import SPRINT_COLUMNS, build_sprints, sprint_calendar
 from sprint_forecast.timeline import as_of_many, to_utc
@@ -46,6 +47,8 @@ ITEM_HISTORY_COLUMNS = [
 ]
 CYCLE_FILE = "cycle.csv"
 CYCLE_STATES_FILE = "cycle_states.csv"
+GOLIVE_FILE = "golive.csv"
+GOLIVE_CURVE_FILE = "golive_curve.csv"
 CYCLE_FILE_COLUMNS = [
     "item_id", "project", "team", "team_key", "type", "iteration", "assignee",
     "points_at_start", "points", "re_estimated", "started", "closed", "days", "returns",
@@ -243,7 +246,8 @@ def export_forecasts(
     commit cutoff beside each running sprint that has passed it. Appends sprint_forecasts/<run_id>.csv and
     item_forecasts/<run_id>.csv; replaces sprints.csv (every reconstructed sprint and its outcome), items.csv (every
     committed or added item, who held it at the end and its outcome), cycle.csv and cycle_states.csv (every finished
-    item's cycle time and its time per state) and, when `backtest_csv` exists, backtest.csv."""
+    item's cycle time and its time per state), golive.csv and golive_curve.csv (when each active parent's open
+    children should all be done) and, when `backtest_csv` exists, backtest.csv."""
     check_bundle(bundle)
     out = Path(out)
     now = pd.Timestamp.now(tz="UTC").floor("s") if now is None else to_utc(now)
@@ -253,7 +257,7 @@ def export_forecasts(
     trained_at = to_utc(bundle["trained_at"]) if bundle.get("trained_at") else pd.NaT
     history = build_sprints(cache, **settings, close_grace_hours=bundle.get("close_grace_hours", 0.0))
     chosen = select_sprints(sprint_calendar(cache, settings["commit_grace_days"]), now)
-    sprint_rows, item_frames = [], []
+    sprint_rows, item_frames, p_open = [], [], {}
     for iteration, group in chosen.groupby("iteration", sort=False):
         status = group.set_index("sprint_id")["status"]
         cutoff = group["cutoff"].iloc[0]
@@ -268,6 +272,8 @@ def export_forecasts(
             if sid not in status.index:
                 continue
             key = f"{run_id}|{sid}"
+            if status[sid] == "running":
+                p_open.update(zip(scored.items["item_id"].astype("int64"), scored.items["p"].astype(float)))
             items = _item_rows(fc, scored, cache, settings["done_categories"], run_id, key)
             item_frames.append(items)
             sprint_rows.append(_sprint_row(
@@ -284,6 +290,11 @@ def export_forecasts(
     ]
     cycle, cycle_states = cycle_files(cache, cache.users, settings)
     files += [write_csv(cycle, out / CYCLE_FILE), write_csv(cycle_states, out / CYCLE_STATES_FILE)]
+    parents, curve = golive(
+        cache, history, now=now, work_item_types=settings["work_item_types"],
+        done_categories=settings["done_categories"], p_open=p_open, sigma=fc.sigma,
+    )
+    files += [write_csv(parents, out / GOLIVE_FILE), write_csv(curve, out / GOLIVE_CURVE_FILE)]
     if backtest_csv is not None and Path(backtest_csv).exists():
         files.append(_copy(Path(backtest_csv), out / BACKTEST_FILE))
     return ExportResult(run_id, out, sprints, files)
