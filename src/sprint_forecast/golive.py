@@ -1,5 +1,5 @@
 """Go-live forecast: the chance that every open child of a parent item (a feature, say) is done by each coming
-sprint's end. Children in the team's running sprint are drawn with the item model; each later sprint draws one of
+sprint's end. Children in any running sprint are drawn with the item model; each later sprint draws one of
 the parent's own recent sprints of burn (points of its children finished in it). Scope added later is not foreseen."""
 from __future__ import annotations
 
@@ -37,11 +37,13 @@ def _fill_points(kids: pd.DataFrame, history: SprintData, now: pd.Timestamp) -> 
     return kids["raw_points"].fillna(fill).astype("float64")
 
 
-def _parent_team(team_keys: pd.Series) -> str | None:
-    counts = team_keys.dropna().value_counts()
-    if counts.empty:
-        return None
-    return sorted(counts[counts == counts.max()].index)[0]
+def _parent_team(ch: pd.DataFrame) -> str | None:
+    """The team holding most of the open children's points; all the children's when no open child has a team."""
+    for rows in (ch[~ch["is_done"]], ch):
+        weight = rows.dropna(subset=["team_key"]).groupby("team_key")["points"].sum()
+        if len(weight):
+            return sorted(weight[weight == weight.max()].index)[0]
+    return None
 
 
 def _steps(tcal: pd.DataFrame, now: pd.Timestamp, horizon_sprints: int) -> list[tuple[int, str | None, pd.Timestamp]]:
@@ -111,13 +113,14 @@ def golive(
 
     cal = sprint_calendar(cache)
     live = set(cal.loc[cal["end"] > now, "iteration"])
+    running_its = set(cal.loc[(cal["start"] <= now) & (cal["end"] > now), "iteration"])
     recent = now - pd.Timedelta(days=active_days)
     for pid, ch in kids.groupby("parent_id", sort=True):
         open_ = ch[~ch["is_done"]]
         finished = ch[ch["is_done"]]
         if open_.empty or not (open_["iteration"].isin(live).any() or (finished["done_at"] >= recent).any()):
             continue
-        team_key = _parent_team(ch["team_key"])
+        team_key = _parent_team(ch)
         tcal = cal[cal["team_key"] == team_key].sort_values("start", kind="mergesort")
         row = {
             "parent_id": pid, "project": ch["project"].mode().iloc[0],
@@ -127,8 +130,7 @@ def golive(
             "done_points": float(finished["points"].sum()), "burn_sprints": 0, "mean_burn": np.nan,
             "p_this_sprint": np.nan, "p50_end": pd.NaT, "p85_end": pd.NaT,
         }
-        running = tcal[(tcal["start"] <= now) & (tcal["end"] > now)].head(1)
-        in_sprint = open_[open_["iteration"].isin(running["iteration"])]
+        in_sprint = open_[open_["iteration"].isin(running_its) | open_["item_id"].isin(set(p_open))]
         row["in_sprint_points"] = float(in_sprint["points"].sum())
         if tcal.empty:
             parents_out.append({**row, "status": "no team"})

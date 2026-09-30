@@ -86,9 +86,10 @@ after that, still in the sprint), `carried` (moved to a later sprint), `backlog`
 iteration), `removed` or `open`.
 
 The go-live forecast covers parents (a feature, say) with an open child of the counted types and a child either
-open in a running or coming sprint or finished in the last 16 weeks. Children in the team's running sprint are
-drawn with the item model; each later sprint burns one of the parent's last 8 ended sprints (points of its
-children finished in it, from the first sprint one was started). Under 2 such sprints, or no burn in them, gets
+open in a running or coming sprint or finished in the last 16 weeks. Its team is the one holding most of its open
+children's points. Children open in any team's running sprint are drawn with the item model; each later sprint of
+the parent's team burns one of its last 8 ended sprints (points of the children finished in it, from the first
+sprint one was started). Under 2 such sprints, or no burn in them, gets
 no curve. Work added to the parent later is not foreseen, so the dates are a floor.
 
 Changed in 0.2.0: a running sprint used to be scored at its commit cutoff, and `item_forecasts` listed committed

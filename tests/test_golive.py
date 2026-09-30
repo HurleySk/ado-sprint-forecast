@@ -16,6 +16,9 @@ SPRINTS = [
     for p, s in zip(PATHS, STARTS)
 ]
 RED = team("Team Red", ["Alpha\\Red"], PATHS)
+BLUE_PATH = "Alpha\\Blue 4"
+BLUE = team("Team Blue", ["Alpha\\Blue"], [BLUE_PATH])
+BLUE_SPRINT = iteration(BLUE_PATH, SPRINTS[4]["start_date"], SPRINTS[4]["end_date"])
 NOW = STARTS[4] + pd.Timedelta(days=3)  # Sprint 4 is running
 ACTIVE = {"state": "Active", "state_category": "InProgress"}
 CLOSED = {"state": "Closed", "state_category": "Completed"}
@@ -37,8 +40,8 @@ def finished(item_id: int, k: int, parent: int, points=5.0) -> list[dict]:
     ]
 
 
-def run(tmp_path, revisions, **kw):
-    cache = build_cache(tmp_path, revisions, SPRINTS, [RED])
+def run(tmp_path, revisions, iterations=SPRINTS, teams=(RED,), **kw):
+    cache = build_cache(tmp_path, revisions, list(iterations), list(teams))
     history = build_sprints(cache, work_item_types=TYPES)
     kw.setdefault("now", NOW)
     return golive(cache, history, work_item_types=TYPES, done_categories=["Completed"], **kw)
@@ -86,6 +89,29 @@ def test_children_in_the_running_sprint_are_drawn_with_the_item_model(tmp_path):
     assert parents.set_index("parent_id").loc[100, "in_sprint_points"] == 5.0
     _, unlikely = run(tmp_path / "b", revs, p_open={4: 0.0001})
     assert unlikely.set_index("k")["p_done_by"][1] < 0.01
+
+
+def test_children_in_another_teams_running_sprint_are_drawn_too(tmp_path):
+    parents, curve = run(tmp_path, STEADY + [
+        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=5.0),
+        rev(4, 2, day(4, 0), parent_id=100, iteration=PATHS[4], story_points=5.0, **ACTIVE),
+        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, area="Alpha\\Blue", story_points=3.0),
+        rev(5, 2, day(4, 0), parent_id=100, iteration=BLUE_PATH, area="Alpha\\Blue", story_points=3.0, **ACTIVE),
+    ], iterations=SPRINTS + [BLUE_SPRINT], teams=(RED, BLUE), p_open={4: 0.9999, 5: 0.9999})
+    p = parents.set_index("parent_id").loc[100]
+    assert p["team_key"] == "Alpha/Team Red" and p["in_sprint_points"] == 8.0
+    assert curve.set_index("k")["p_done_by"][0] > 0.99
+
+
+def test_the_parent_team_holds_most_of_the_open_points(tmp_path):
+    parents, _ = run(tmp_path, STEADY + finished(6, 1, 700) + finished(7, 2, 700) + [
+        rev(4, 1, day(3, 1), parent_id=100, iteration=BACKLOG, area="Alpha\\Blue", story_points=8.0),
+        rev(5, 1, day(3, 1), parent_id=100, iteration=BACKLOG, story_points=2.0),
+        rev(8, 1, day(3, 1), parent_id=700, iteration=BACKLOG, area="Alpha\\Green", story_points=5.0),
+    ], iterations=SPRINTS + [BLUE_SPRINT], teams=(RED, BLUE))
+    teams = parents.set_index("parent_id")["team_key"]
+    assert teams[100] == "Alpha/Team Blue"
+    assert teams[700] == "Alpha/Team Red"  # no open child has a team: all children decide
 
 
 def test_removed_children_drop_out_and_unestimated_ones_take_the_team_median(tmp_path):
